@@ -1,0 +1,127 @@
+name: Runner Information
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_size:
+        description: "Runner size to test"
+        required: true
+        default: "small"
+        type: choice
+        options:
+          - small
+          - medium
+          - large
+
+jobs:
+  runner-info:
+    name: Collect Runner Information
+    runs-on:
+      - self-hosted
+      - fireactions
+      - linux
+      - ${{ inputs.runner_size }}
+
+    steps:
+      - name: Runner Context
+        run: |
+          echo "## Runner Context" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          echo '${{ toJSON(runner) }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: System Information
+        run: |
+          echo "=== Hostname ==="
+          hostname
+
+          echo ""
+          echo "=== OS Release ==="
+          cat /etc/os-release
+
+          echo ""
+          echo "=== Kernel ==="
+          uname -a
+
+          echo ""
+          echo "=== CPU Info ==="
+          lscpu | head -20
+
+          echo ""
+          echo "=== Memory ==="
+          free -h
+
+          echo ""
+          echo "=== Disk Space ==="
+          df -h
+
+          echo ""
+          echo "=== Network Interfaces ==="
+          ip addr show
+
+          echo ""
+          echo "=== DNS Resolution ==="
+          cat /etc/resolv.conf
+
+          echo ""
+          echo "=== Environment Variables ==="
+          env | sort | grep -E '^(RUNNER_|GITHUB_|HOME|PATH|USER)' || true
+
+      - name: Docker Status
+        run: |
+          echo "=== Docker Version ==="
+          docker --version || echo "Docker not available"
+
+          echo ""
+          echo "=== Docker Info ==="
+          docker info 2>/dev/null || echo "Docker daemon not running"
+
+      - name: Runner Tools
+        run: |
+          echo "=== Available Tools ==="
+          echo "Git: $(git --version 2>/dev/null || echo 'not found')"
+          echo "Curl: $(curl --version 2>/dev/null | head -1 || echo 'not found')"
+          echo "Wget: $(wget --version 2>/dev/null | head -1 || echo 'not found')"
+          echo "Jq: $(jq --version 2>/dev/null || echo 'not found')"
+          echo "Node: $(node --version 2>/dev/null || echo 'not found')"
+          echo "Python: $(python3 --version 2>/dev/null || echo 'not found')"
+          echo "Go: $(go version 2>/dev/null || echo 'not found')"
+          echo "Nix: $(nix --version 2>/dev/null || echo 'not found')"
+
+      - name: Runner Performance Test
+        run: |
+          echo "=== Simple Performance Test ==="
+
+          echo "CPU benchmark (calculating primes):"
+          time (for i in $(seq 1 1000); do factor $i > /dev/null; done)
+
+          echo ""
+          echo "Disk write test:"
+          time dd if=/dev/zero of=/tmp/testfile bs=1M count=100 conv=fdatasync 2>&1
+          rm -f /tmp/testfile
+
+          echo ""
+          echo "Network test (ping GitHub):"
+          ping -c 3 github.com || echo "Ping failed"
+
+      - name: GitHub API Access Test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== GitHub API Test ==="
+          curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            https://api.github.com/rate_limit | jq '.rate' || echo "API test failed"
+
+      - name: Summary
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## System Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Hostname | $(hostname) |" >> $GITHUB_STEP_SUMMARY
+          echo "| OS | $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel | $(uname -r) |" >> $GITHUB_STEP_SUMMARY
+          echo "| CPUs | $(nproc) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Memory | $(free -h | awk '/^Mem:/ {print $2}') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Disk | $(df -h / | awk 'NR==2 {print $2}') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner Size | ${{ inputs.runner_size }} |" >> $GITHUB_STEP_SUMMARY

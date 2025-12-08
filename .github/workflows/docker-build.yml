@@ -1,0 +1,44 @@
+name: Docker Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_size:
+        description: "Runner size to use"
+        required: true
+        default: "small"
+        type: choice
+        options:
+          - small
+          - medium
+          - large
+
+jobs:
+  build:
+    runs-on: [self-hosted, fireactions, linux, "${{ inputs.runner_size }}"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        # Using default docker-container driver with BuildKit
+        # Requires custom kernel with CONFIG_IP_NF_RAW for bridge networking
+
+      - name: Build multi-stage image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.example
+          push: false
+          load: true
+          tags: test-app:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Using default bridge network - enabled by custom kernel
+
+      - name: Run built container
+        run: |
+          # Test with default bridge networking
+          docker run --rm test-app:latest

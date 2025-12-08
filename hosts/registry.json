@@ -1,0 +1,13 @@
+{
+  "do-runner-1": {
+    "hostname": "165.227.162.140",
+    "provider": "do",
+    "system": "x86_64-linux",
+    "deployed": "2025-12-07T14:08:55+01:00",
+    "tags": [
+      "dev",
+      "runners",
+      "small"
+    ]
+  }
+}
