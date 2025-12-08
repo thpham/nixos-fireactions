@@ -141,7 +141,7 @@ let
 
         image = lib.mkOption {
           type = lib.types.str;
-          default = "ghcr.io/hostinger/fireactions-images/ubuntu22.04:latest";
+          default = "ghcr.io/thpham/fireactions-images/ubuntu-24.04:latest";
           description = "OCI image for the runner";
         };
 
