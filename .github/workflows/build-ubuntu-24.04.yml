@@ -1,0 +1,164 @@
+name: Build Ubuntu 24.04 Base Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version (e.g., 0.4.0-0.1.0)"
+        required: true
+        default: "0.4.0-0.1.0"
+  push:
+    tags:
+      - "ubuntu-24.04/*" # Matches: ubuntu-24.04/0.4.0-0.1.0
+    branches:
+      - main
+    paths:
+      - "images/docker/ubuntu-24.04/**"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/fireactions-images/ubuntu-24.04
+
+jobs:
+  # Extract version from trigger
+  prepare:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      image_name: ${{ steps.meta.outputs.image_name }}
+    steps:
+      - name: Determine version
+        id: meta
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Extract from tag: ubuntu-24.04/0.4.0-0.1.0
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#*/}"
+          else
+            # Default for push to main (paths trigger)
+            VERSION="latest"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "image_name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_OUTPUT
+
+  # Build on native runners for each architecture
+  build:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: images/docker/ubuntu-24.04
+          platforms: ${{ matrix.platform }}
+          push: true
+          outputs: type=image,name=${{ needs.prepare.outputs.image_name }},push-by-digest=true,name-canonical=true
+          cache-from: type=gha,scope=ubuntu-24.04-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ubuntu-24.04-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Create multi-arch manifest
+  manifest:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          IMAGE_NAME="${{ needs.prepare.outputs.image_name }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+
+          # Build tags array
+          TAGS="-t ${IMAGE_NAME}:${VERSION}"
+          if [[ "${VERSION}" != "latest" ]]; then
+            TAGS="${TAGS} -t ${IMAGE_NAME}:latest"
+          fi
+
+          # Create and push manifest
+          docker buildx imagetools create ${TAGS} \
+            $(printf "${IMAGE_NAME}@sha256:%s " *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.version }}
+
+      - name: Summary
+        run: |
+          echo "## Ubuntu 24.04 Base Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ needs.prepare.outputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ needs.prepare.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ needs.prepare.outputs.version }}" != "latest" ]]; then
+            echo "- \`latest\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Architectures:** \`amd64\`, \`arm64\`" >> $GITHUB_STEP_SUMMARY
