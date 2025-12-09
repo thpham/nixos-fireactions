@@ -1,0 +1,585 @@
+# Transparent Registry Proxy Cache for Fireactions
+#
+# This module provides a fully transparent caching proxy for container registries.
+# VMs pull images normally (e.g., `docker pull ghcr.io/...`) without any explicit
+# proxy configuration - DNS interception + MITM proxy makes caching invisible.
+#
+# Components:
+# - dnsmasq: DNS interception redirecting registry domains to local proxy
+# - Squid: SSL-bump MITM proxy with LRU caching
+# - CA generation: Auto-generated CA certificate for TLS termination
+# - Cloud-init integration: CA + DNS injected via MMDS at VM boot
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+let
+  cfg = config.services.fireactions.registryCache;
+  fireactionsCfg = config.services.fireactions;
+
+  # Calculate gateway IP from subnet (e.g., 10.200.0.0/24 -> 10.200.0.1)
+  subnetParts = lib.splitString "/" fireactionsCfg.networking.subnet;
+  networkAddr = lib.head subnetParts;
+  networkOctets = lib.splitString "." networkAddr;
+  gateway = "${lib.elemAt networkOctets 0}.${lib.elemAt networkOctets 1}.${lib.elemAt networkOctets 2}.1";
+
+  # Parse storage size to MB for Squid (e.g., "50GB" -> 50000)
+  parseSizeToMB =
+    sizeStr:
+    let
+      # Remove any spaces and convert to uppercase
+      normalized = lib.toUpper (lib.replaceStrings [ " " ] [ "" ] sizeStr);
+      # Extract number and unit
+      numStr = lib.head (builtins.match "([0-9]+).*" normalized);
+      num = lib.toInt numStr;
+    in
+    if lib.hasSuffix "TB" normalized then
+      num * 1000000
+    else if lib.hasSuffix "GB" normalized then
+      num * 1000
+    else if lib.hasSuffix "MB" normalized then
+      num
+    else
+      num; # Assume MB if no unit
+
+  storageSizeMB = parseSizeToMB cfg.storage.maxSize;
+  memoryCacheMB = parseSizeToMB cfg.storage.memoryCache;
+
+  # Generate dnsmasq address entries for registry interception
+  dnsmasqAddresses = map (
+    registry:
+    # Handle docker.io special case (actual domain is registry-1.docker.io)
+    if registry == "docker.io" then
+      [
+        "/docker.io/${gateway}"
+        "/registry-1.docker.io/${gateway}"
+      ]
+    else
+      [ "/${registry}/${gateway}" ]
+  ) cfg.registries;
+
+  # Flatten the list of addresses
+  flatDnsmasqAddresses = lib.flatten dnsmasqAddresses;
+
+  # Generate Squid ACL domains
+  squidDomains = lib.concatStringsSep " " (
+    map (r: if r == "docker.io" then ".docker.io .registry-1.docker.io" else ".${r}") cfg.registries
+  );
+
+  # CA certificate paths
+  caDir = "/var/lib/registry-cache";
+  caCertPath = if cfg.ca.certFile != null then cfg.ca.certFile else "${caDir}/ca.crt";
+  caKeyPath = if cfg.ca.keyFile != null then cfg.ca.keyFile else "${caDir}/ca.key";
+
+  # Squid configuration
+  squidConfig = ''
+    # ========================================
+    # NETWORK CONFIGURATION
+    # ========================================
+    # Listen on the gateway IP for intercepted HTTPS traffic
+    http_port ${gateway}:3128
+    https_port ${gateway}:443 intercept ssl-bump \
+      generate-host-certificates=on \
+      dynamic_cert_mem_cache_size=512MB \
+      cert=${caCertPath} \
+      key=${caKeyPath}
+
+    # Certificate generator helper
+    sslcrtd_program ${pkgs.squid}/libexec/security_file_certgen \
+      -s ${caDir}/ssl_db -M 512MB
+    sslcrtd_children 5
+
+    # ========================================
+    # ACCESS CONTROL
+    # ========================================
+    # Define registry domains to intercept
+    acl registries dstdomain ${squidDomains}
+    acl localnet src ${fireactionsCfg.networking.subnet}
+    acl SSL_ports port 443
+    acl Safe_ports port 443
+
+    # Allow only local network
+    http_access allow localnet
+    http_access deny all
+
+    # SSL bump registry traffic, splice (pass-through) everything else
+    ssl_bump bump registries
+    ssl_bump splice all
+
+    # ========================================
+    # FRESHNESS POLICY (refresh_pattern)
+    # Controls when to revalidate, NOT storage lifetime
+    # Format: refresh_pattern regex MIN_AGE PERCENT MAX_AGE [options]
+    # ========================================
+
+    # Registry blobs (content-addressable) - never revalidate (immutable)
+    # Path: /v2/<name>/blobs/sha256:<digest>
+    refresh_pattern -i /v2/.*/blobs/sha256:[a-f0-9]+ 10080 100% 525600 override-expire ignore-no-store ignore-private
+
+    # Registry manifests by digest - never revalidate (immutable)
+    refresh_pattern -i /v2/.*/manifests/sha256:[a-f0-9]+ 10080 100% 525600 override-expire ignore-no-store ignore-private
+
+    # Registry manifests by tag - short freshness (tags can change)
+    refresh_pattern -i /v2/.*/manifests/[^/]+$ 1 50% 60
+
+    # Registry API endpoints - don't cache
+    refresh_pattern -i /v2/?$ 0 0% 0
+    refresh_pattern -i /v2/_catalog 0 0% 0
+    refresh_pattern -i /v2/.*/tags/list 0 0% 0
+
+    # Token endpoints - don't cache
+    refresh_pattern -i /token 0 0% 0
+    refresh_pattern -i /oauth2/token 0 0% 0
+
+    # Default for everything else
+    refresh_pattern . 60 50% 1440
+
+    # ========================================
+    # STORAGE WITH LRU EVICTION
+    # When full, least-recently-used objects are evicted
+    # On miss, re-fetch from upstream (transparent to client)
+    # ========================================
+
+    # Cache directory: type path size_MB L1 L2
+    cache_dir aufs ${cfg.storage.cacheDir} ${toString storageSizeMB} 16 256
+
+    # Object size limits
+    minimum_object_size 0 KB
+    maximum_object_size 5 GB
+    maximum_object_size_in_memory 10 MB
+
+    # Memory cache (hot objects)
+    cache_mem ${toString memoryCacheMB} MB
+
+    # LRU replacement policy
+    cache_replacement_policy lru
+    memory_replacement_policy lru
+
+    # ========================================
+    # PERFORMANCE TUNING
+    # ========================================
+
+    # Aggressive caching - store even if upstream says no-cache
+    # (Registry blobs are immutable by digest, safe to ignore headers)
+    ignore_expect_100 on
+
+    # Logging
+    logformat combined %>a %[ui %[un [%tl] "%rm %ru HTTP/%rv" %>Hs %<st "%{Referer}>h" "%{User-Agent}>h" %Ss:%Sh
+    access_log daemon:${cfg.logging.accessLog} combined
+    cache_log ${cfg.logging.cacheLog}
+
+    ${lib.optionalString cfg.logging.logCacheStatus ''
+      # Cache hit headers for debugging
+      reply_header_add X-Cache-Status HIT all
+    ''}
+
+    # PID file
+    pid_filename /run/squid/squid.pid
+
+    # Coredump directory
+    coredump_dir ${cfg.storage.cacheDir}
+  '';
+
+  squidConfigFile = pkgs.writeText "squid.conf" squidConfig;
+
+  # Cloud-init user-data template for VMs
+  # This gets injected into MMDS metadata and processed by cloud-init in the VM
+  cloudInitUserData = pkgs.writeText "cloud-init-user-data.yaml" ''
+    #cloud-config
+    # Registry cache CA certificate and DNS configuration
+    # Injected by fireactions registry-cache module
+
+    ca_certs:
+      trusted:
+        - |
+          @REGISTRY_CACHE_CA_CERT@
+
+    manage_resolv_conf: true
+    resolv_conf:
+      nameservers:
+        - ${gateway}
+      searchdomains: []
+      options:
+        ndots: 1
+  '';
+
+  # Credential type for registry authentication
+  credentialType = lib.types.submodule {
+    options = {
+      username = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Username for registry authentication (use usernameFile for secrets)";
+      };
+      usernameFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to file containing username";
+      };
+      password = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Password for registry authentication (use passwordFile for secrets)";
+      };
+      passwordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to file containing password";
+      };
+    };
+  };
+
+in
+{
+  options.services.fireactions.registryCache = {
+    enable = lib.mkEnableOption "transparent registry proxy cache for Firecracker VMs";
+
+    registries = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [
+        "ghcr.io"
+        "docker.io"
+        "quay.io"
+        "gcr.io"
+      ];
+      description = "Container registries to intercept and cache";
+      example = [
+        "ghcr.io"
+        "docker.io"
+      ];
+    };
+
+    storage = {
+      cacheDir = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/cache/registry-cache";
+        description = "Directory for cached registry data";
+      };
+
+      maxSize = lib.mkOption {
+        type = lib.types.str;
+        default = "50GB";
+        description = "Maximum cache size (LRU eviction when full)";
+        example = "100GB";
+      };
+
+      memoryCache = lib.mkOption {
+        type = lib.types.str;
+        default = "2GB";
+        description = "Memory cache for hot objects";
+        example = "4GB";
+      };
+    };
+
+    credentials = lib.mkOption {
+      type = lib.types.attrsOf credentialType;
+      default = { };
+      description = ''
+        Registry credentials for authenticated pulls (e.g., docker.io rate limit bypass).
+        Use *File options for secrets management (agenix, sops-nix).
+      '';
+      example = lib.literalExpression ''
+        {
+          "registry-1.docker.io" = {
+            usernameFile = config.age.secrets.dockerhub-user.path;
+            passwordFile = config.age.secrets.dockerhub-pass.path;
+          };
+        }
+      '';
+    };
+
+    ca = {
+      certFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to CA certificate. Auto-generated if null.";
+      };
+
+      keyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to CA private key. Auto-generated if null.";
+      };
+
+      validDays = lib.mkOption {
+        type = lib.types.int;
+        default = 3650;
+        description = "CA certificate validity in days (for auto-generated cert)";
+      };
+
+      commonName = lib.mkOption {
+        type = lib.types.str;
+        default = "Fireactions Registry Cache CA";
+        description = "Common name for auto-generated CA certificate";
+      };
+    };
+
+    logging = {
+      accessLog = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/log/registry-cache/access.log";
+        description = "Path to access log";
+      };
+
+      cacheLog = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/log/registry-cache/cache.log";
+        description = "Path to cache log";
+      };
+
+      logCacheStatus = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Add X-Cache-Status header to responses";
+      };
+    };
+
+    dns = {
+      upstreamServers = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [
+          "8.8.8.8"
+          "1.1.1.1"
+        ];
+        description = "Upstream DNS servers for non-intercepted queries";
+      };
+    };
+
+    # Internal options (set by this module, used by fireactions-node.nix)
+    _internal = {
+      caCertPath = lib.mkOption {
+        type = lib.types.str;
+        internal = true;
+        default = caCertPath;
+        description = "Path to CA certificate (set automatically)";
+      };
+
+      gateway = lib.mkOption {
+        type = lib.types.str;
+        internal = true;
+        default = gateway;
+        description = "Gateway IP address (set automatically)";
+      };
+
+      cloudInitUserData = lib.mkOption {
+        type = lib.types.path;
+        internal = true;
+        default = cloudInitUserData;
+        description = "Cloud-init user-data template (set automatically)";
+      };
+    };
+  };
+
+  config = lib.mkIf (fireactionsCfg.enable && cfg.enable) {
+    # DNS interception via dnsmasq
+    services.dnsmasq = {
+      enable = true;
+      settings = {
+        # Listen only on the VM bridge interface
+        interface = fireactionsCfg.networking.bridgeName;
+        bind-interfaces = true;
+
+        # Don't use /etc/resolv.conf
+        no-resolv = true;
+
+        # Override registry domains -> point to local proxy
+        address = flatDnsmasqAddresses;
+
+        # Forward other queries to upstream DNS
+        server = cfg.dns.upstreamServers;
+
+        # Cache DNS responses
+        cache-size = 1000;
+
+        # Log queries for debugging (optional)
+        log-queries = false;
+      };
+    };
+
+    # Create required directories
+    systemd.tmpfiles.rules = [
+      "d ${caDir} 0750 squid squid -"
+      "d ${caDir}/ssl_db 0750 squid squid -"
+      "d ${cfg.storage.cacheDir} 0750 squid squid -"
+      "d /var/log/registry-cache 0750 squid squid -"
+      "d /run/squid 0750 squid squid -"
+    ];
+
+    # CA certificate generation service
+    systemd.services.registry-cache-ca-setup = lib.mkIf (cfg.ca.certFile == null) {
+      description = "Generate CA certificate for registry cache";
+      wantedBy = [ "registry-cache.service" ];
+      before = [ "registry-cache.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "root";
+      };
+      script = ''
+        set -euo pipefail
+
+        CA_DIR="${caDir}"
+        CA_CERT="$CA_DIR/ca.crt"
+        CA_KEY="$CA_DIR/ca.key"
+
+        # Always ensure directories exist with correct permissions
+        # Note: Don't create ssl_db - security_file_certgen needs to create it
+        mkdir -p "$CA_DIR"
+        chown squid:squid "$CA_DIR"
+
+        # Skip CA generation if CA already exists and is valid
+        if [ -f "$CA_CERT" ] && [ -f "$CA_KEY" ]; then
+          # Check if cert is still valid (has at least 30 days left)
+          if ${pkgs.openssl}/bin/openssl x509 -checkend 2592000 -noout -in "$CA_CERT" 2>/dev/null; then
+            echo "CA certificate exists and is valid"
+            exit 0
+          fi
+          echo "CA certificate expired or expiring soon, regenerating..."
+        fi
+
+        # Generate CA private key
+        ${pkgs.openssl}/bin/openssl genrsa -out "$CA_KEY" 4096
+
+        # Generate CA certificate
+        ${pkgs.openssl}/bin/openssl req -new -x509 \
+          -days ${toString cfg.ca.validDays} \
+          -key "$CA_KEY" \
+          -out "$CA_CERT" \
+          -subj "/CN=${cfg.ca.commonName}" \
+          -addext "basicConstraints=critical,CA:TRUE" \
+          -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+        # Set permissions
+        chown squid:squid "$CA_CERT" "$CA_KEY"
+        chmod 0644 "$CA_CERT"
+        chmod 0600 "$CA_KEY"
+
+        echo "CA certificate generated: $CA_CERT"
+      '';
+    };
+
+    # Initialize Squid SSL certificate database
+    systemd.services.registry-cache-ssl-db-setup = {
+      description = "Initialize Squid SSL certificate database";
+      wantedBy = [ "registry-cache.service" ];
+      before = [ "registry-cache.service" ];
+      after = [ "registry-cache-ca-setup.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "squid";
+      };
+      script = ''
+        set -euo pipefail
+
+        SSL_DB="${caDir}/ssl_db"
+
+        echo "Initialization SSL db..."
+
+        # Skip if already initialized
+        if [ -f "$SSL_DB/index.txt" ]; then
+          echo "SSL database already initialized"
+          exit 0
+        fi
+
+        # Remove empty/corrupt ssl_db directory if it exists
+        # security_file_certgen needs to create the directory itself
+        if [ -d "$SSL_DB" ]; then
+          echo "Removing incomplete ssl_db directory..."
+          rm -rf "$SSL_DB"
+        fi
+
+        # Initialize the SSL certificate database
+        ${pkgs.squid}/libexec/security_file_certgen -c -s "$SSL_DB" -M 512MB
+
+        echo "SSL database initialized"
+      '';
+    };
+
+    # Initialize Squid cache directory
+    systemd.services.registry-cache-cache-setup = {
+      description = "Initialize Squid cache directory";
+      wantedBy = [ "registry-cache.service" ];
+      before = [ "registry-cache.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "squid";
+      };
+      script = ''
+        set -euo pipefail
+
+        CACHE_DIR="${cfg.storage.cacheDir}"
+
+        # Skip if already initialized
+        if [ -d "$CACHE_DIR/00" ]; then
+          echo "Cache directory already initialized"
+          exit 0
+        fi
+
+        # Initialize cache directory structure
+        ${pkgs.squid}/bin/squid -z -f ${squidConfigFile} -N
+
+        echo "Cache directory initialized"
+      '';
+    };
+
+    # Main Squid proxy service
+    systemd.services.registry-cache = {
+      description = "Registry Cache Proxy (Squid)";
+      wantedBy = [ "multi-user.target" ];
+      after = [
+        "network-online.target"
+        "registry-cache-ca-setup.service"
+        "registry-cache-ssl-db-setup.service"
+        "registry-cache-cache-setup.service"
+      ];
+      wants = [ "network-online.target" ];
+
+      serviceConfig = {
+        Type = "simple";
+        User = "squid";
+        Group = "squid";
+        ExecStart = "${pkgs.squid}/bin/squid -f ${squidConfigFile} -N";
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
+        Restart = "on-failure";
+        RestartSec = 5;
+
+        # Capabilities for binding to port 443
+        AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
+        CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
+
+        # Security hardening
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        ReadWritePaths = [
+          caDir
+          cfg.storage.cacheDir
+          "/var/log/registry-cache"
+          "/run/squid"
+        ];
+      };
+    };
+
+    # Ensure squid user exists
+    users.users.squid = {
+      isSystemUser = true;
+      group = "squid";
+      description = "Squid proxy daemon user";
+    };
+    users.groups.squid = { };
+
+    # Firewall: allow DNS and HTTPS from VM subnet
+    networking.firewall = {
+      interfaces.${fireactionsCfg.networking.bridgeName} = {
+        allowedTCPPorts = [ 443 ];
+        allowedUDPPorts = [ 53 ];
+      };
+    };
+  };
+}

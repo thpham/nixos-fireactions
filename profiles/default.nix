@@ -25,6 +25,9 @@ let
     small = ./small.nix;
     medium = ./medium.nix;
     large = ./large.nix;
+
+    # Infrastructure profiles
+    registry-cache = ./registry-cache.nix;
   };
 
   # Get profiles for a list of tags
