@@ -23,8 +23,15 @@ let
   # Calculate gateway IP from subnet (e.g., 10.200.0.0/24 -> 10.200.0.1)
   subnetParts = lib.splitString "/" fireactionsCfg.networking.subnet;
   networkAddr = lib.head subnetParts;
+  subnetMask = lib.elemAt subnetParts 1;
   networkOctets = lib.splitString "." networkAddr;
-  gateway = "${lib.elemAt networkOctets 0}.${lib.elemAt networkOctets 1}.${lib.elemAt networkOctets 2}.1";
+  networkPrefix = "${lib.elemAt networkOctets 0}.${lib.elemAt networkOctets 1}.${lib.elemAt networkOctets 2}";
+  gateway = "${networkPrefix}.1";
+
+  # DHCP range (for /24 subnet: .2 to .254)
+  dhcpStart = "${networkPrefix}.2";
+  dhcpEnd = "${networkPrefix}.254";
+  netmask = if subnetMask == "24" then "255.255.255.0" else "255.255.255.0";
 
   # Parse storage size to MB for Squid (e.g., "50GB" -> 50000)
   parseSizeToMB =
@@ -374,7 +381,7 @@ in
   };
 
   config = lib.mkIf (fireactionsCfg.enable && cfg.enable) {
-    # DNS interception via dnsmasq
+    # DNS interception and DHCP via dnsmasq
     services.dnsmasq = {
       enable = true;
       settings = {
@@ -396,6 +403,20 @@ in
 
         # Log queries for debugging (optional)
         log-queries = false;
+
+        # DHCP server for VMs
+        # Range: .2 to .254 (reserve .1 for gateway)
+        dhcp-range = "${dhcpStart},${dhcpEnd},${netmask},12h";
+
+        # DHCP options
+        # Option 3: Router (gateway)
+        dhcp-option = [
+          "3,${gateway}"
+          "6,${gateway}"
+        ];
+
+        # Rapid commit for faster DHCP
+        dhcp-rapid-commit = true;
       };
     };
 

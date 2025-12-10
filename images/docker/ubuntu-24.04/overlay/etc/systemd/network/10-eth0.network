@@ -1,0 +1,13 @@
+# Network configuration for Firecracker VM
+# Gets IP via DHCP from host's dnsmasq on the fireactions bridge
+
+[Match]
+Name=eth0
+
+[Network]
+DHCP=ipv4
+
+[DHCP]
+UseDNS=yes
+UseRoutes=yes
+UseMTU=yes
