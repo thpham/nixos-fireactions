@@ -395,6 +395,12 @@ in
         default = "10.200.0.0/24";
         description = "Subnet for microVM networking";
       };
+
+      externalInterface = lib.mkOption {
+        type = lib.types.str;
+        default = "eth0";
+        description = "External network interface for NAT masquerading (e.g., eth0, ens3)";
+      };
     };
   };
 
@@ -789,6 +795,16 @@ in
         (lib.toInt (lib.last (lib.splitString ":" cfg.metricsAddress)))
       ];
       trustedInterfaces = [ cfg.networking.bridgeName ];
+    };
+
+    # NAT configuration for microVM networking
+    # CNI's ipMasq only creates NAT rules for CNI-assigned IPs, but our DHCP server
+    # assigns different IPs. This adds subnet-wide masquerading for all VM traffic.
+    networking.nat = {
+      enable = true;
+      internalInterfaces = [ cfg.networking.bridgeName ];
+      internalIPs = [ cfg.networking.subnet ];
+      externalInterface = cfg.networking.externalInterface;
     };
 
     # Assertions

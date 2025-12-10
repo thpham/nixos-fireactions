@@ -32,6 +32,8 @@ let
       ../deploy/digitalocean.nix
       { networking.hostName = lib.mkForce ""; } # Let cloud-init set it
       { disko.devices.disk.disk1.device = "/dev/vda"; }
+      # DigitalOcean uses ens3 as the external interface (not eth0)
+      { services.fireactions.networking.externalInterface = "ens3"; }
     ];
 
     # Hetzner Cloud/Dedicated

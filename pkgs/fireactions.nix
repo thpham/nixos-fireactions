@@ -17,6 +17,14 @@ buildGoModule rec {
 
   vendorHash = "sha256-DCPj2JJr1UY5DYa472NnT1x7ZqZyuu0jOUpM4dxwL+8=";
 
+  # Patch to use MMDS V1 instead of V2
+  # Cloud-init's IMDSv2 support is not compatible with Firecracker's MMDS V2
+  # V1 allows simple GET requests without token authentication
+  postPatch = ''
+    substituteInPlace server/pool.go \
+      --replace 'MmdsVersion: firecracker.MMDSv2' 'MmdsVersion: firecracker.MMDSv1'
+  '';
+
   subPackages = [ "cmd/fireactions" ];
 
   ldflags = [
