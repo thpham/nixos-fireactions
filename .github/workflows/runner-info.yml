@@ -132,7 +132,7 @@ jobs:
           echo "--- User-Data Received ---"
           if [ -f /var/lib/cloud/instance/user-data.txt ]; then
             echo "User-data file exists, first 50 lines:"
-            head -50 /var/lib/cloud/instance/user-data.txt
+            sudo head -50 /var/lib/cloud/instance/user-data.txt
           else
             echo "No user-data file found"
           fi
