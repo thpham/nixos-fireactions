@@ -112,6 +112,44 @@ jobs:
           curl -s -H "Authorization: token $GITHUB_TOKEN" \
             https://api.github.com/rate_limit | jq '.rate' || echo "API test failed"
 
+      - name: Cloud-Init Status
+        run: |
+          echo "=== Cloud-Init Status ==="
+
+          echo ""
+          echo "--- Cloud-Init Version ---"
+          cloud-init --version 2>/dev/null || echo "cloud-init not installed"
+
+          echo ""
+          echo "--- Cloud-Init Status ---"
+          cloud-init status --long 2>/dev/null || echo "Could not get status"
+
+          echo ""
+          echo "--- Cloud-Init Modules Ran ---"
+          cat /run/cloud-init/status.json 2>/dev/null | jq '.v1 | to_entries[] | select(.value.errors != null and (.value.errors | length > 0)) | {stage: .key, errors: .value.errors}' 2>/dev/null || echo "No errors or status not available"
+
+          echo ""
+          echo "--- User-Data Received ---"
+          if [ -f /var/lib/cloud/instance/user-data.txt ]; then
+            echo "User-data file exists, first 50 lines:"
+            head -50 /var/lib/cloud/instance/user-data.txt
+          else
+            echo "No user-data file found"
+          fi
+
+          echo ""
+          echo "--- CA Certificates Directory ---"
+          echo "Contents of /usr/local/share/ca-certificates/:"
+          ls -la /usr/local/share/ca-certificates/ 2>/dev/null || echo "Directory empty or doesn't exist"
+
+          echo ""
+          echo "--- Cloud-Init ca_certs Log ---"
+          grep -i "ca.certs\|ca_certs\|certificate" /var/log/cloud-init.log 2>/dev/null | tail -20 || echo "No ca_certs entries found"
+
+          echo ""
+          echo "--- Cloud-Init resolv_conf Log ---"
+          grep -i "resolv" /var/log/cloud-init.log 2>/dev/null | tail -10 || echo "No resolv_conf entries found"
+
       - name: Registry Cache Validation
         run: |
           echo "=== Registry Cache Validation ==="

@@ -33,7 +33,8 @@ if "github" in config:
 # Inject metadata into all pools
 if "pools" in config:
     # Add EC2-compatible metadata fields for cloud-init datasource validation
-    # These are required for cloud-init EC2 datasource to recognize MMDS
+    # instance-id is required for cloud-init EC2 datasource to recognize MMDS
+    # Note: hostname is set dynamically via runcmd from fireactions.runner_id
     for pool in config["pools"]:
         if "firecracker" not in pool:
             pool["firecracker"] = {}
@@ -43,8 +44,6 @@ if "pools" in config:
         pool_name = pool.get("name", "default")
         if "instance-id" not in pool["firecracker"]["metadata"]:
             pool["firecracker"]["metadata"]["instance-id"] = f"i-fireactions-{pool_name}"
-        if "local-hostname" not in pool["firecracker"]["metadata"]:
-            pool["firecracker"]["metadata"]["local-hostname"] = f"runner-{pool_name}"
 
 # Inject registry-cache cloud-init user-data into all pools
 registry_cache_enabled = os.environ.get("REGISTRY_CACHE_ENABLED", "false") == "true"
@@ -75,6 +74,14 @@ resolv_conf:
   searchdomains: []
   options:
     ndots: 1
+# Set unique hostname from fireactions runner_id (available in MMDS after VM creation)
+runcmd:
+  - |
+    RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id 2>/dev/null)
+    if [ -n "$RUNNER_ID" ]; then
+      hostnamectl set-hostname "$RUNNER_ID"
+      echo "Hostname set to: $RUNNER_ID"
+    fi
 """
 
         # Inject user-data into all pools (firecracker/metadata already initialized above)

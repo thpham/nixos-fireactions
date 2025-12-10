@@ -91,6 +91,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cloud-init \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Disable systemd-resolved so cloud-init's resolv_conf module can manage /etc/resolv.conf
+# Ubuntu 24.04 uses systemd-resolved by default which prevents cloud-init from setting DNS
+RUN systemctl disable systemd-resolved.service \
+    && rm -f /etc/resolv.conf \
+    && echo "# Managed by cloud-init - will be configured at boot" > /etc/resolv.conf \
+    && echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
 COPY overlay/etc /etc
 COPY --from=fireactions /usr/bin/fireactions /usr/bin/fireactions
 
