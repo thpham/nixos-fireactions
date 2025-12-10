@@ -70,6 +70,7 @@
     wget
     htop
     tmux
+    dig
   ];
 
   # Timezone (override in per-host config if needed)

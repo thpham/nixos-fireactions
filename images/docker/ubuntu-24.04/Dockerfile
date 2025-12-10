@@ -85,7 +85,19 @@ RUN echo 'root:fireactions' | chpasswd                                          
 
 RUN echo "" > /etc/machine-id && echo "" > /var/lib/dbus/machine-id
 
+# Install cloud-init for CA certificate and DNS configuration via MMDS
+# This enables transparent registry caching without VM-side configuration changes
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cloud-init \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 COPY overlay/etc /etc
 COPY --from=fireactions /usr/bin/fireactions /usr/bin/fireactions
+
+# Enable cloud-init services (runs before Docker starts)
+RUN systemctl enable cloud-init-local.service \
+    cloud-init.service \
+    cloud-config.service \
+    cloud-final.service
 
 RUN systemctl enable fireactions.service

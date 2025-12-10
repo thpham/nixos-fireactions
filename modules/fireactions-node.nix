@@ -7,6 +7,7 @@
 
 let
   cfg = config.services.fireactions;
+  registryCacheCfg = config.services.fireactions.registryCache;
 
   # Import our custom packages
   fireactionsPkg = pkgs.callPackage ../pkgs/fireactions.nix { };
@@ -104,6 +105,10 @@ let
           mem_size_mib = pool.firecracker.memSizeMib;
           vcpu_count = pool.firecracker.vcpuCount;
         };
+      }
+      # Add metadata if configured (either user-defined or auto-injected)
+      // lib.optionalAttrs (pool.firecracker.metadata != { }) {
+        metadata = pool.firecracker.metadata;
       };
     }) cfg.pools;
   };
@@ -193,6 +198,21 @@ let
           type = lib.types.str;
           default = "console=ttyS0 reboot=k panic=1 pci=off";
           description = "Kernel command line arguments";
+        };
+
+        metadata = lib.mkOption {
+          type = lib.types.attrsOf lib.types.str;
+          default = { };
+          description = ''
+            Metadata to pass to the Firecracker VM via MMDS.
+            This is accessible from within the VM at http://169.254.169.254/
+            Cloud-init can use this for CA certificates and DNS configuration.
+          '';
+          example = lib.literalExpression ''
+            {
+              "user-data" = "...cloud-config yaml...";
+            }
+          '';
         };
       };
     };
@@ -420,6 +440,24 @@ in
       };
     };
 
+    # Add registry mirrors to containerd when registry cache is enabled
+    # This allows the host's containerd to use the cache for pulling runner images
+    virtualisation.containerd.settings.plugins."io.containerd.grpc.v1.cri".registry.mirrors =
+      lib.mkIf registryCacheCfg.enable
+        (
+          lib.listToAttrs (
+            map (
+              registry:
+              let
+                # Handle docker.io special case
+                mirrorKey = if registry == "docker.io" then "docker.io" else registry;
+                endpoint = "http://${registryCacheCfg._internal.gateway}:3128";
+              in
+              lib.nameValuePair mirrorKey { endpoint = [ endpoint ]; }
+            ) registryCacheCfg.registries
+          )
+        );
+
     # Add required tools to containerd's PATH for devmapper snapshotter
     # - lvm2: dmsetup for device mapper operations
     # - thin-provisioning-tools: thin_check, thin_repair for thin pools
@@ -578,97 +616,84 @@ in
       '';
     };
 
-    # Config preparation service - injects secrets at runtime
+    # Config preparation service - injects secrets and registry-cache metadata at runtime
     systemd.services.fireactions-config =
-      lib.mkIf
-        (cfg.configFile == null && (cfg.github.appPrivateKeyFile != null || cfg.github.appIdFile != null))
-        {
-          description = "Prepare fireactions config with secrets";
-          wantedBy = [ "fireactions.service" ];
-          before = [ "fireactions.service" ];
-          requiredBy = [ "fireactions.service" ];
+      let
+        needsGithubSecrets = cfg.github.appPrivateKeyFile != null || cfg.github.appIdFile != null;
+        needsRegistryCache = registryCacheCfg.enable;
+        needsConfigService = cfg.configFile == null && (needsGithubSecrets || needsRegistryCache);
+      in
+      lib.mkIf needsConfigService {
+        description = "Prepare fireactions config with secrets and registry-cache metadata";
+        wantedBy = [ "fireactions.service" ];
+        before = [ "fireactions.service" ];
+        requiredBy = [ "fireactions.service" ];
 
-          # Restart when base config changes (e.g., pool settings, organization)
-          restartTriggers = [ configFile ];
+        # Restart when base config changes (e.g., pool settings, organization)
+        restartTriggers = [ configFile ];
 
-          serviceConfig = {
-            Type = "oneshot";
-            RemainAfterExit = true;
-            User = "root"; # Need root to read secrets
-          };
+        # Wait for registry-cache CA to be generated
+        after = lib.optional needsRegistryCache "registry-cache-ca-setup.service";
 
-          script = ''
-            set -euo pipefail
-
-            ${lib.optionalString (cfg.github.appPrivateKeyFile != null) ''
-              # Verify the private key file exists
-              if [ ! -f "${cfg.github.appPrivateKeyFile}" ]; then
-                echo "ERROR: GitHub App private key file not found: ${cfg.github.appPrivateKeyFile}"
-                exit 1
-              fi
-            ''}
-
-            ${lib.optionalString (cfg.github.appIdFile != null) ''
-              # Verify the app ID file exists
-              if [ ! -f "${cfg.github.appIdFile}" ]; then
-                echo "ERROR: GitHub App ID file not found: ${cfg.github.appIdFile}"
-                exit 1
-              fi
-            ''}
-
-            # Inject secrets into config using Python for proper YAML handling
-            export APP_ID_FILE="${lib.optionalString (cfg.github.appIdFile != null) cfg.github.appIdFile}"
-            export PRIVATE_KEY_FILE="${
-              lib.optionalString (cfg.github.appPrivateKeyFile != null) cfg.github.appPrivateKeyFile
-            }"
-
-            ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${pkgs.writeText "inject-secrets.py" ''
-              import yaml
-              import os
-
-              # Custom representer for multi-line strings (block scalar style)
-              def str_representer(dumper, data):
-                  if "\n" in data:
-                      return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-                  return dumper.represent_scalar("tag:yaml.org,2002:str", data)
-
-              yaml.add_representer(str, str_representer)
-
-              # Read the base config
-              with open("/etc/fireactions/config.yaml", "r") as f:
-                  config = yaml.safe_load(f)
-
-              # Inject secrets from files (paths from environment)
-              if "github" in config:
-                  app_id_file = os.environ.get("APP_ID_FILE", "")
-                  if app_id_file:
-                      with open(app_id_file, "r") as f:
-                          config["github"]["app_id"] = int(f.read().strip())
-
-                  private_key_file = os.environ.get("PRIVATE_KEY_FILE", "")
-                  if private_key_file:
-                      with open(private_key_file, "r") as f:
-                          config["github"]["app_private_key"] = f.read()
-
-              # Write the final config
-              with open("/run/fireactions/config.yaml", "w") as f:
-                  yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-              print("Config with secrets written to /run/fireactions/config.yaml")
-            ''}
-
-            # Set proper permissions
-            chown ${cfg.user}:${cfg.group} /run/fireactions/config.yaml
-            chmod 0640 /run/fireactions/config.yaml
-          '';
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          User = "root"; # Need root to read secrets
         };
+
+        script = ''
+          set -euo pipefail
+
+          ${lib.optionalString (cfg.github.appPrivateKeyFile != null) ''
+            # Verify the private key file exists
+            if [ ! -f "${cfg.github.appPrivateKeyFile}" ]; then
+              echo "ERROR: GitHub App private key file not found: ${cfg.github.appPrivateKeyFile}"
+              exit 1
+            fi
+          ''}
+
+          ${lib.optionalString (cfg.github.appIdFile != null) ''
+            # Verify the app ID file exists
+            if [ ! -f "${cfg.github.appIdFile}" ]; then
+              echo "ERROR: GitHub App ID file not found: ${cfg.github.appIdFile}"
+              exit 1
+            fi
+          ''}
+
+          ${lib.optionalString needsRegistryCache ''
+            # Verify the registry-cache CA cert exists
+            if [ ! -f "${registryCacheCfg._internal.caCertPath}" ]; then
+              echo "ERROR: Registry cache CA certificate not found: ${registryCacheCfg._internal.caCertPath}"
+              exit 1
+            fi
+          ''}
+
+          # Inject secrets into config using Python for proper YAML handling
+          export APP_ID_FILE="${lib.optionalString (cfg.github.appIdFile != null) cfg.github.appIdFile}"
+          export PRIVATE_KEY_FILE="${
+            lib.optionalString (cfg.github.appPrivateKeyFile != null) cfg.github.appPrivateKeyFile
+          }"
+          export REGISTRY_CACHE_ENABLED="${lib.boolToString needsRegistryCache}"
+          export REGISTRY_CACHE_CA_FILE="${lib.optionalString needsRegistryCache registryCacheCfg._internal.caCertPath}"
+          export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.gateway}"
+
+          ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./fireactions-inject-secrets.py}
+
+          # Set proper permissions
+          chown ${cfg.user}:${cfg.group} /run/fireactions/config.yaml
+          chmod 0640 /run/fireactions/config.yaml
+        '';
+      };
 
     # Main fireactions service
     systemd.services.fireactions =
       let
-        # Whether we need the config service (file-based secrets)
+        # Whether we need the config service (file-based secrets or registry-cache metadata)
         needsConfigService =
-          cfg.configFile == null && (cfg.github.appPrivateKeyFile != null || cfg.github.appIdFile != null);
+          cfg.configFile == null
+          && (
+            cfg.github.appPrivateKeyFile != null || cfg.github.appIdFile != null || registryCacheCfg.enable
+          );
       in
       {
         description = "Fireactions - GitHub Actions Runner Manager";
