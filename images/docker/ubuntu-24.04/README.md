@@ -88,7 +88,19 @@ ubuntu-24.04/
 └── overlay/
     └── etc/
         ├── hosts                       # Hostname config
-        ├── resolv.conf                 # DNS config
-        └── systemd/system/
-            └── fireactions.service     # Runner agent service
+        ├── cloud/cloud.cfg.d/
+        │   └── 99-fireactions.cfg      # cloud-init datasource config
+        └── systemd/
+            ├── system/
+            │   └── fireactions.service # Runner agent service
+            └── network/
+                └── 10-eth0.network     # systemd-networkd config
 ```
+
+## DNS Configuration
+
+DNS is configured via cloud-init's `resolv_conf` module:
+
+1. Host injects gateway IP (dnsmasq) via cloud-init user-data
+2. cloud-init writes `/etc/resolv.conf` with gateway as nameserver
+3. dnsmasq intercepts registry domains and points to local proxy

@@ -112,6 +112,31 @@ jobs:
           curl -s -H "Authorization: token $GITHUB_TOKEN" \
             https://api.github.com/rate_limit | jq '.rate' || echo "API test failed"
 
+      - name: MMDS Metadata Debug
+        run: |
+          echo "=== MMDS Metadata Debug ==="
+          echo "Checking what's available in MMDS..."
+
+          echo ""
+          echo "--- /latest/ ---"
+          curl -sf http://169.254.169.254/latest/ 2>/dev/null || echo "Failed to fetch /latest/"
+
+          echo ""
+          echo "--- /latest/meta-data/ ---"
+          curl -sf http://169.254.169.254/latest/meta-data/ 2>/dev/null || echo "Failed to fetch meta-data"
+
+          echo ""
+          echo "--- All meta-data keys ---"
+          for key in $(curl -sf http://169.254.169.254/latest/meta-data/ 2>/dev/null); do
+            echo "  $key: $(curl -sf http://169.254.169.254/latest/meta-data/$key 2>/dev/null | head -c 100)"
+          done
+
+          echo ""
+          echo "--- Checking runner_id paths ---"
+          echo "  /latest/meta-data/runner_id: $(curl -sf http://169.254.169.254/latest/meta-data/runner_id 2>/dev/null || echo 'not found')"
+          echo "  /latest/meta-data/fireactions/runner_id: $(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id 2>/dev/null || echo 'not found')"
+          echo "  /latest/meta-data/instance-id: $(curl -sf http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo 'not found')"
+
       - name: Cloud-Init Status
         run: |
           echo "=== Cloud-Init Status ==="

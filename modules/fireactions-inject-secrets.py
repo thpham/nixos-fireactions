@@ -52,37 +52,40 @@ if registry_cache_enabled and "pools" in config:
     gateway = os.environ.get("REGISTRY_CACHE_GATEWAY", "")
 
     if ca_file and gateway:
-        # Read CA certificate and indent it for YAML block scalar
+        # Read CA certificate
         with open(ca_file, "r") as f:
             ca_cert_raw = f.read().rstrip('\n')
-        # Indent each line by 6 spaces (content under "- |" block scalar)
-        ca_cert_indented = '\n'.join('      ' + line for line in ca_cert_raw.split('\n'))
 
         # Generate cloud-init user-data
-        user_data = f"""#cloud-config
-# Registry cache configuration - auto-injected by fireactions
-# CA certificate for HTTPS MITM proxy
-ca_certs:
-  trusted:
-    - |
-{ca_cert_indented}
-# DNS resolver pointing to host (for registry interception)
-manage_resolv_conf: true
-resolv_conf:
-  nameservers:
-    - {gateway}
-  searchdomains: []
-  options:
-    ndots: 1
-# Set unique hostname from fireactions runner_id (available in MMDS after VM creation)
-runcmd:
-  - |
-    RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id 2>/dev/null)
-    if [ -n "$RUNNER_ID" ]; then
-      hostnamectl set-hostname "$RUNNER_ID"
-      echo "Hostname set to: $RUNNER_ID"
-    fi
-"""
+        user_data_lines = [
+            "#cloud-config",
+            "# Registry cache configuration - auto-injected by fireactions",
+            "",
+            "# DNS configuration - use gateway (dnsmasq) as nameserver",
+            "manage_resolv_conf: true",
+            "resolv_conf:",
+            "  nameservers:",
+            f"    - {gateway}",
+            "",
+            "# CA certificate for registry cache proxy",
+            "ca_certs:",
+            "  trusted:",
+            "  - |",
+        ]
+        # Add certificate lines with 3-space indent (1 more than "- |" at 2 spaces)
+        for line in ca_cert_raw.split('\n'):
+            user_data_lines.append(f"   {line}")
+        # Add runcmd section to set hostname from runner_id
+        user_data_lines.extend([
+            "# Set unique hostname from fireactions runner_id",
+            "runcmd:",
+            "- |",
+            "  RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id)",
+            '  if [ -n "$RUNNER_ID" ]; then',
+            '    hostnamectl set-hostname "$RUNNER_ID"',
+            "  fi",
+        ])
+        user_data = '\n'.join(user_data_lines) + '\n'
 
         # Inject user-data into all pools (firecracker/metadata already initialized above)
         for pool in config["pools"]:

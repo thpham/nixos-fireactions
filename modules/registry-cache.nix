@@ -194,23 +194,17 @@ let
 
   # Cloud-init user-data template for VMs
   # This gets injected into MMDS metadata and processed by cloud-init in the VM
+  # Note: DNS is configured via DHCP (dnsmasq option 6) → systemd-resolved
+  #       No need for resolv_conf in cloud-init user-data
   cloudInitUserData = pkgs.writeText "cloud-init-user-data.yaml" ''
     #cloud-config
-    # Registry cache CA certificate and DNS configuration
+    # Registry cache CA certificate
     # Injected by fireactions registry-cache module
 
     ca_certs:
       trusted:
         - |
           @REGISTRY_CACHE_CA_CERT@
-
-    manage_resolv_conf: true
-    resolv_conf:
-      nameservers:
-        - ${gateway}
-      searchdomains: []
-      options:
-        ndots: 1
   '';
 
   # Credential type for registry authentication
