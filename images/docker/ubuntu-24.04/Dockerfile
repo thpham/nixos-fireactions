@@ -93,10 +93,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Disable systemd-resolved so cloud-init's resolv_conf module can manage /etc/resolv.conf
 # Ubuntu 24.04 uses systemd-resolved by default which prevents cloud-init from setting DNS
-RUN systemctl disable systemd-resolved.service \
-    && rm -f /etc/resolv.conf \
-    && echo "# Managed by cloud-init - will be configured at boot" > /etc/resolv.conf \
-    && echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+# Note: We mask the service (symlink to /dev/null) since systemctl doesn't work during docker build
+# Note: /etc/resolv.conf cannot be modified during docker build (mounted read-only)
+#       cloud-init's resolv_conf module will write it at boot time
+RUN mkdir -p /etc/systemd/system \
+    && ln -sf /dev/null /etc/systemd/system/systemd-resolved.service
 
 COPY overlay/etc /etc
 COPY --from=fireactions /usr/bin/fireactions /usr/bin/fireactions
