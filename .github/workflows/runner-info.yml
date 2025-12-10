@@ -112,6 +112,114 @@ jobs:
           curl -s -H "Authorization: token $GITHUB_TOKEN" \
             https://api.github.com/rate_limit | jq '.rate' || echo "API test failed"
 
+      - name: Registry Cache Validation
+        run: |
+          echo "=== Registry Cache Validation ==="
+
+          echo ""
+          echo "--- DNS Configuration ---"
+          echo "resolv.conf contents:"
+          cat /etc/resolv.conf
+
+          echo ""
+          echo "--- DNS Resolution Test ---"
+          echo "Resolving ghcr.io:"
+          nslookup ghcr.io || dig ghcr.io +short || host ghcr.io || echo "DNS lookup tools not available"
+
+          echo ""
+          echo "Resolving docker.io:"
+          nslookup docker.io || dig docker.io +short || host docker.io || echo "DNS lookup tools not available"
+
+          echo ""
+          echo "--- CA Certificate Check ---"
+          echo "Fireactions Registry Cache CA:"
+          if grep -l "Fireactions Registry Cache CA" /etc/ssl/certs/*.pem 2>/dev/null; then
+            echo "✅ CA certificate found in /etc/ssl/certs/"
+          elif [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+            if grep -q "Fireactions Registry Cache" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
+              echo "✅ CA certificate found in ca-certificates.crt"
+            else
+              echo "⚠️ CA certificate NOT found in ca-certificates.crt"
+            fi
+          else
+            echo "⚠️ Could not verify CA certificate installation"
+          fi
+
+          echo ""
+          echo "--- HTTPS Connectivity Test ---"
+          echo "Testing HTTPS to ghcr.io (should work if CA cert is installed):"
+          if curl -sS --connect-timeout 10 -o /dev/null -w "HTTP %{http_code} - %{time_total}s\n" https://ghcr.io/v2/; then
+            echo "✅ HTTPS connection to ghcr.io successful"
+          else
+            echo "❌ HTTPS connection to ghcr.io failed"
+          fi
+
+          echo ""
+          echo "Testing HTTPS to registry-1.docker.io:"
+          if curl -sS --connect-timeout 10 -o /dev/null -w "HTTP %{http_code} - %{time_total}s\n" https://registry-1.docker.io/v2/; then
+            echo "✅ HTTPS connection to docker.io successful"
+          else
+            echo "❌ HTTPS connection to docker.io failed (401 is expected without auth)"
+          fi
+
+      - name: Docker Pull Test (Cache Validation)
+        run: |
+          echo "=== Docker Pull Test ==="
+
+          echo ""
+          echo "--- Pulling small test image ---"
+          echo "First pull (should go through cache if configured):"
+          time docker pull alpine:latest
+
+          echo ""
+          echo "--- Docker image info ---"
+          docker images alpine:latest
+
+          echo ""
+          echo "--- Running container test ---"
+          docker run --rm alpine:latest echo "✅ Container execution successful"
+
+          echo ""
+          echo "--- Cleanup ---"
+          docker rmi alpine:latest || true
+
+      - name: Registry Cache Summary
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Registry Cache Status" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          # Check DNS nameserver
+          if grep -q "10.200.0.1" /etc/resolv.conf 2>/dev/null; then
+            echo "| DNS Nameserver | ✅ Points to host (10.200.0.1) |" >> $GITHUB_STEP_SUMMARY
+          else
+            NS=$(grep nameserver /etc/resolv.conf | head -1 | awk '{print $2}')
+            echo "| DNS Nameserver | ⚠️ Using $NS |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check CA certificate
+          if grep -q "Fireactions Registry Cache" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
+            echo "| CA Certificate | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| CA Certificate | ❌ Not found |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check HTTPS connectivity
+          if curl -sS --connect-timeout 5 https://ghcr.io/v2/ >/dev/null 2>&1; then
+            echo "| HTTPS to ghcr.io | ✅ Working |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| HTTPS to ghcr.io | ⚠️ Check logs |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check Docker pull
+          if docker pull hello-world >/dev/null 2>&1; then
+            echo "| Docker Pull | ✅ Working |" >> $GITHUB_STEP_SUMMARY
+            docker rmi hello-world >/dev/null 2>&1 || true
+          else
+            echo "| Docker Pull | ❌ Failed |" >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Summary
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY

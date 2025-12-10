@@ -30,7 +30,23 @@ if "github" in config:
         with open(private_key_file, "r") as f:
             config["github"]["app_private_key"] = f.read()
 
-# Inject registry-cache cloud-init metadata into all pools
+# Inject metadata into all pools
+if "pools" in config:
+    # Add EC2-compatible metadata fields for cloud-init datasource validation
+    # These are required for cloud-init EC2 datasource to recognize MMDS
+    for pool in config["pools"]:
+        if "firecracker" not in pool:
+            pool["firecracker"] = {}
+        if "metadata" not in pool["firecracker"]:
+            pool["firecracker"]["metadata"] = {}
+
+        pool_name = pool.get("name", "default")
+        if "instance-id" not in pool["firecracker"]["metadata"]:
+            pool["firecracker"]["metadata"]["instance-id"] = f"i-fireactions-{pool_name}"
+        if "local-hostname" not in pool["firecracker"]["metadata"]:
+            pool["firecracker"]["metadata"]["local-hostname"] = f"runner-{pool_name}"
+
+# Inject registry-cache cloud-init user-data into all pools
 registry_cache_enabled = os.environ.get("REGISTRY_CACHE_ENABLED", "false") == "true"
 if registry_cache_enabled and "pools" in config:
     ca_file = os.environ.get("REGISTRY_CACHE_CA_FILE", "")
@@ -61,13 +77,8 @@ resolv_conf:
     ndots: 1
 """
 
-        # Inject into all pools
+        # Inject user-data into all pools (firecracker/metadata already initialized above)
         for pool in config["pools"]:
-            if "firecracker" not in pool:
-                pool["firecracker"] = {}
-            if "metadata" not in pool["firecracker"]:
-                pool["firecracker"]["metadata"] = {}
-
             # Only set if not already configured (allow override)
             if "user-data" not in pool["firecracker"]["metadata"]:
                 pool["firecracker"]["metadata"]["user-data"] = user_data
