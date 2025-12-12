@@ -12,6 +12,7 @@
         maxRunners = 2;
         minRunners = 1;
         runner = {
+          imagePullPolicy = "Always";
           organization = "ithings-ch";
           groupId = 1; # Default runner group
           labels = [
