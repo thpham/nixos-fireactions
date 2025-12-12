@@ -211,6 +211,61 @@ jobs:
           fi
 
           echo ""
+          echo "--- CA Bundle Verification ---"
+          echo "Checking if CA is in system trust bundle..."
+          if grep -q "Fireactions Registry Cache CA" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
+            echo "✅ CA certificate IS in /etc/ssl/certs/ca-certificates.crt"
+          else
+            echo "❌ CA certificate NOT in /etc/ssl/certs/ca-certificates.crt"
+            echo "  This means update-ca-certificates didn't add it to the bundle!"
+          fi
+
+          echo ""
+          echo "Hash symlinks in /etc/ssl/certs/:"
+          ls -la /etc/ssl/certs/ | grep -i "cloud-init\|fireactions" || echo "  No cloud-init/fireactions symlinks found"
+
+          echo ""
+          echo "--- OpenSSL TLS Debug ---"
+          echo "Testing TLS handshake to ghcr.io via openssl s_client:"
+          echo | timeout 10 openssl s_client -connect ghcr.io:443 -servername ghcr.io 2>&1 | head -30 || echo "  openssl s_client failed"
+
+          echo ""
+          echo "--- curl CA Bundle Path ---"
+          echo "curl's default CA bundle:"
+          curl --version 2>/dev/null | grep -i "ssl\|tls\|ca" || true
+          echo "CURL_CA_BUNDLE env: ${CURL_CA_BUNDLE:-not set}"
+          echo "SSL_CERT_FILE env: ${SSL_CERT_FILE:-not set}"
+          echo "SSL_CERT_DIR env: ${SSL_CERT_DIR:-not set}"
+
+          echo ""
+          echo "--- /etc/ca-certificates.conf check (blank line bug) ---"
+          echo "Looking for cloud-init entries and blank lines:"
+          grep -n "cloud-init" /etc/ca-certificates.conf 2>/dev/null || echo "  No cloud-init entries found"
+          echo ""
+          echo "Last 10 lines of /etc/ca-certificates.conf:"
+          tail -10 /etc/ca-certificates.conf 2>/dev/null | cat -A || echo "  File not found"
+          echo ""
+          echo "Checking for blank lines before cloud-init entry (known bug LP#1077020):"
+          if grep -B1 "cloud-init" /etc/ca-certificates.conf 2>/dev/null | grep -q "^$"; then
+            echo "⚠️ BLANK LINE FOUND before cloud-init entry - this causes the cert to be ignored!"
+          else
+            echo "✅ No blank line issue detected"
+          fi
+
+          echo ""
+          echo "--- update-ca-certificates status ---"
+          echo "Re-running update-ca-certificates --fresh to force regeneration:"
+          sudo update-ca-certificates --fresh 2>&1 | tail -20 || echo "  update-ca-certificates failed"
+
+          echo ""
+          echo "After fresh update, checking bundle again:"
+          if grep -q "Fireactions Registry Cache CA" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
+            echo "✅ CA certificate IS NOW in bundle after fresh update"
+          else
+            echo "❌ CA certificate STILL NOT in bundle even after fresh update"
+          fi
+
+          echo ""
           echo "--- HTTPS Connectivity Test ---"
           echo "Testing HTTPS to ghcr.io (should work if CA cert is installed):"
           # Check HTTP status code, not just curl exit code
