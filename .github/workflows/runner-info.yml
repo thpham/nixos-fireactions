@@ -196,34 +196,58 @@ jobs:
           echo ""
           echo "--- CA Certificate Check ---"
           echo "Fireactions Registry Cache CA:"
-          if grep -l "Fireactions Registry Cache CA" /etc/ssl/certs/*.pem 2>/dev/null; then
-            echo "✅ CA certificate found in /etc/ssl/certs/"
-          elif [ -f /etc/ssl/certs/ca-certificates.crt ]; then
-            if grep -q "Fireactions Registry Cache" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
-              echo "✅ CA certificate found in ca-certificates.crt"
-            else
-              echo "⚠️ CA certificate NOT found in ca-certificates.crt"
-            fi
+          # Check for the actual certificate file written by cloud-init write_files
+          # Note: We check the source file, not the bundle (which is Base64-encoded)
+          if [ -f /usr/local/share/ca-certificates/fireactions-registry-cache.crt ]; then
+            echo "✅ CA certificate file exists"
+            echo "Certificate subject:"
+            openssl x509 -in /usr/local/share/ca-certificates/fireactions-registry-cache.crt -noout -subject 2>/dev/null || echo "  (could not parse)"
           else
-            echo "⚠️ Could not verify CA certificate installation"
+            echo "⚠️ CA certificate file NOT found at /usr/local/share/ca-certificates/fireactions-registry-cache.crt"
+            echo "  This means cloud-init write_files hasn't run yet (race condition) or registry-cache is not enabled"
           fi
 
           echo ""
           echo "--- HTTPS Connectivity Test ---"
           echo "Testing HTTPS to ghcr.io (should work if CA cert is installed):"
-          if curl -sS --connect-timeout 10 -o /dev/null -w "HTTP %{http_code} - %{time_total}s\n" https://ghcr.io/v2/; then
-            echo "✅ HTTPS connection to ghcr.io successful"
-          else
-            echo "❌ HTTPS connection to ghcr.io failed"
-          fi
+          # Check HTTP status code, not just curl exit code
+          # 200/401 = working (registry responds), 503 = proxy error, SSL errors = CA cert issue
+          HTTP_CODE=$(curl -sS --connect-timeout 10 -o /dev/null -w "%{http_code}" https://ghcr.io/v2/ 2>&1) || true
+          echo "HTTP Status: $HTTP_CODE"
+          case "$HTTP_CODE" in
+            200|401)
+              echo "✅ HTTPS connection to ghcr.io working (registry responded)"
+              ;;
+            503)
+              echo "❌ HTTP 503 - Proxy/upstream error (Squid may have issues)"
+              ;;
+            000)
+              echo "❌ Connection failed - likely SSL/TLS error (CA cert not trusted?)"
+              curl -sS --connect-timeout 5 https://ghcr.io/v2/ 2>&1 | head -3 || true
+              ;;
+            *)
+              echo "⚠️ Unexpected HTTP status: $HTTP_CODE"
+              ;;
+          esac
 
           echo ""
           echo "Testing HTTPS to registry-1.docker.io:"
-          if curl -sS --connect-timeout 10 -o /dev/null -w "HTTP %{http_code} - %{time_total}s\n" https://registry-1.docker.io/v2/; then
-            echo "✅ HTTPS connection to docker.io successful"
-          else
-            echo "❌ HTTPS connection to docker.io failed (401 is expected without auth)"
-          fi
+          HTTP_CODE=$(curl -sS --connect-timeout 10 -o /dev/null -w "%{http_code}" https://registry-1.docker.io/v2/ 2>&1) || true
+          echo "HTTP Status: $HTTP_CODE"
+          case "$HTTP_CODE" in
+            200|401)
+              echo "✅ HTTPS connection to docker.io working (401 is expected without auth)"
+              ;;
+            503)
+              echo "❌ HTTP 503 - Proxy/upstream error"
+              ;;
+            000)
+              echo "❌ Connection failed - likely SSL/TLS error"
+              ;;
+            *)
+              echo "⚠️ Unexpected HTTP status: $HTTP_CODE"
+              ;;
+          esac
 
       - name: Docker Pull Test (Cache Validation)
         run: |
@@ -261,19 +285,26 @@ jobs:
             echo "| DNS Nameserver | ⚠️ Using $NS |" >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Check CA certificate
-          if grep -q "Fireactions Registry Cache" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
+          # Check CA certificate (check file existence, not bundle grep)
+          if [ -f /usr/local/share/ca-certificates/fireactions-registry-cache.crt ]; then
             echo "| CA Certificate | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| CA Certificate | ❌ Not found |" >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Check HTTPS connectivity
-          if curl -sS --connect-timeout 5 https://ghcr.io/v2/ >/dev/null 2>&1; then
-            echo "| HTTPS to ghcr.io | ✅ Working |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| HTTPS to ghcr.io | ⚠️ Check logs |" >> $GITHUB_STEP_SUMMARY
-          fi
+          # Check HTTPS connectivity (check HTTP status code, not just curl exit)
+          HTTP_CODE=$(curl -sS --connect-timeout 5 -o /dev/null -w "%{http_code}" https://ghcr.io/v2/ 2>&1) || true
+          case "$HTTP_CODE" in
+            200|401)
+              echo "| HTTPS to ghcr.io | ✅ Working |" >> $GITHUB_STEP_SUMMARY
+              ;;
+            503)
+              echo "| HTTPS to ghcr.io | ❌ Proxy error (503) |" >> $GITHUB_STEP_SUMMARY
+              ;;
+            *)
+              echo "| HTTPS to ghcr.io | ⚠️ Status: $HTTP_CODE |" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
 
           # Check Docker pull
           if docker pull hello-world >/dev/null 2>&1; then

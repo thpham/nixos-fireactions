@@ -1,7 +1,9 @@
 [Unit]
 Description=Fireactions
 Documentation=https://github.com/hostinger/fireactions
-After=network.target
+# Wait for cloud-init to complete - CA certificate and DNS config are set via cloud-init runcmd
+# Note: After= is ignored if cloud-final.service doesn't exist (e.g., no cloud-init installed)
+After=network.target cloud-final.service
 SuccessAction=reboot
 
 [Service]

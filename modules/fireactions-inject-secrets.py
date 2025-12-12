@@ -56,34 +56,36 @@ if registry_cache_enabled and "pools" in config:
         with open(ca_file, "r") as f:
             ca_cert_raw = f.read().rstrip('\n')
 
-        # Generate cloud-init user-data
+        # Generate cloud-init user-data using write_files + runcmd
+        # This approach is more reliable than ca_certs module:
+        # 1. write_files runs in init stage - cert file written early
+        # 2. runcmd runs in config stage - update-ca-certificates runs after file exists
         user_data_lines = [
             "#cloud-config",
             "# Registry cache configuration - auto-injected by fireactions",
             "",
-            "# DNS configuration - use gateway (dnsmasq) as nameserver",
-            "manage_resolv_conf: true",
-            "resolv_conf:",
-            "  nameservers:",
-            f"    - {gateway}",
-            "",
-            "# CA certificate for registry cache proxy",
-            "ca_certs:",
-            "  trusted:",
-            "  - |",
+            "# Write CA certificate to system trust store location",
+            "write_files:",
+            "  - path: /usr/local/share/ca-certificates/fireactions-registry-cache.crt",
+            "    owner: root:root",
+            "    permissions: '0644'",
+            "    content: |",
         ]
-        # Add certificate lines with 3-space indent (1 more than "- |" at 2 spaces)
+        # Add certificate lines with 6-space indent (under the content block scalar)
         for line in ca_cert_raw.split('\n'):
-            user_data_lines.append(f"   {line}")
-        # Add runcmd section to set hostname from runner_id
+            user_data_lines.append(f"      {line}")
+        # Add runcmd section for CA update, DNS, and hostname configuration
         user_data_lines.extend([
-            "# Set unique hostname from fireactions runner_id",
+            "",
+            "# Runtime configuration via runcmd",
             "runcmd:",
-            "- |",
-            "  RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id)",
-            '  if [ -n "$RUNNER_ID" ]; then',
-            '    hostnamectl set-hostname "$RUNNER_ID"',
-            "  fi",
+            "  - update-ca-certificates",
+            f"  - echo 'nameserver {gateway}' > /etc/resolv.conf",
+            "  - |",
+            "    RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id)",
+            '    if [ -n "$RUNNER_ID" ]; then',
+            '      hostnamectl set-hostname "$RUNNER_ID"',
+            "    fi",
         ])
         user_data = '\n'.join(user_data_lines) + '\n'
 

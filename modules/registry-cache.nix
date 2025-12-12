@@ -81,6 +81,10 @@ let
   caCertPath = if cfg.ca.certFile != null then cfg.ca.certFile else "${caDir}/ca.crt";
   caKeyPath = if cfg.ca.keyFile != null then cfg.ca.keyFile else "${caDir}/ca.key";
 
+  # Upstream DNS servers for Squid (bypass local dnsmasq to avoid loop)
+  # Squid must resolve registry domains to real IPs, not back to itself
+  squidDnsServers = lib.concatStringsSep " " cfg.dns.upstreamServers;
+
   # Squid configuration
   squidConfig = ''
     # ========================================
@@ -93,6 +97,11 @@ let
       dynamic_cert_mem_cache_size=512MB \
       cert=${caCertPath} \
       key=${caKeyPath}
+
+    # CRITICAL: Use upstream DNS directly to avoid loop
+    # Without this, Squid would use system resolver (dnsmasq) which
+    # redirects registry domains back to us (10.200.0.1) → infinite loop
+    dns_nameservers ${squidDnsServers}
 
     # Certificate generator helper
     sslcrtd_program ${pkgs.squid}/libexec/security_file_certgen \
@@ -112,9 +121,16 @@ let
     http_access allow localnet
     http_access deny all
 
-    # SSL bump registry traffic, splice (pass-through) everything else
-    ssl_bump bump registries
-    ssl_bump splice all
+    # SSL bump all traffic
+    # In our DNS-override architecture, only registry domains resolve to the
+    # gateway IP (10.200.0.1). Therefore ALL traffic arriving at port 443 is
+    # registry traffic by definition - no need to filter by domain ACL.
+    #
+    # Note: We use "bump all" instead of "bump registries" because at ssl_bump
+    # step1, Squid hasn't parsed the TLS ClientHello yet and doesn't know the
+    # SNI. Using dstdomain ACL here would fail. Since DNS already filters for
+    # us, bumping all traffic is correct and simpler.
+    ssl_bump bump all
 
     # ========================================
     # FRESHNESS POLICY (refresh_pattern)
@@ -595,6 +611,21 @@ in
         allowedTCPPorts = [ 443 ];
         allowedUDPPorts = [ 53 ];
       };
+    };
+
+    # Logrotate for registry-cache logs
+    services.logrotate.settings.registry-cache = {
+      files = "/var/log/registry-cache/*.log";
+      frequency = "daily";
+      rotate = 7;
+      compress = true;
+      delaycompress = true;
+      missingok = true;
+      notifempty = true;
+      create = "0640 squid squid";
+      postrotate = ''
+        ${pkgs.systemd}/bin/systemctl kill --signal=HUP registry-cache.service 2>/dev/null || true
+      '';
     };
   };
 }

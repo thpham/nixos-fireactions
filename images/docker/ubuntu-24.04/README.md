@@ -99,8 +99,8 @@ ubuntu-24.04/
 
 ## DNS Configuration
 
-DNS is configured via cloud-init's `resolv_conf` module:
+DNS is configured via cloud-init runcmd (resolv_conf module doesn't work with systemd-resolved):
 
 1. Host injects gateway IP (dnsmasq) via cloud-init user-data
-2. cloud-init writes `/etc/resolv.conf` with gateway as nameserver
+2. runcmd writes `/etc/resolv.conf` with gateway as nameserver
 3. dnsmasq intercepts registry domains and points to local proxy
