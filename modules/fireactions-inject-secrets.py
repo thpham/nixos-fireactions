@@ -56,30 +56,31 @@ if registry_cache_enabled and "pools" in config:
         with open(ca_file, "r") as f:
             ca_cert_raw = f.read().rstrip('\n')
 
-        # Generate cloud-init user-data using write_files + runcmd
-        # This approach is more reliable than ca_certs module:
-        # 1. write_files runs in init stage - cert file written early
-        # 2. runcmd runs in config stage - update-ca-certificates runs after file exists
+        # Generate cloud-init user-data using ca_certs module
+        # ca_certs runs in cloud-init.service (init stage) and handles BOTH:
+        # 1. Writing the certificate to the trust store
+        # 2. Running update-ca-certificates
+        # Services with After=cloud-init.service will start with CA bundle updated
         user_data_lines = [
             "#cloud-config",
             "# Registry cache configuration - auto-injected by fireactions",
             "",
-            "# Write CA certificate to system trust store location",
-            "write_files:",
-            "  - path: /usr/local/share/ca-certificates/fireactions-registry-cache.crt",
-            "    owner: root:root",
-            "    permissions: '0644'",
-            "    content: |",
+            "# Install CA certificate using ca_certs module",
+            "# This runs in cloud-init.service (init stage) and handles both",
+            "# writing the cert AND running update-ca-certificates",
+            "ca_certs:",
+            "  trusted:",
+            "    - |",
         ]
-        # Add certificate lines with 6-space indent (under the content block scalar)
+        # Add certificate lines with 6-space indent (under the block scalar)
         for line in ca_cert_raw.split('\n'):
             user_data_lines.append(f"      {line}")
-        # Add runcmd section for CA update, DNS, and hostname configuration
+        # Add runcmd section for DNS and hostname configuration only
+        # (update-ca-certificates is handled by ca_certs module above)
         user_data_lines.extend([
             "",
-            "# Runtime configuration via runcmd",
+            "# Runtime configuration via runcmd (DNS and hostname only)",
             "runcmd:",
-            "  - update-ca-certificates",
             f"  - echo 'nameserver {gateway}' > /etc/resolv.conf",
             "  - |",
             "    RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id)",

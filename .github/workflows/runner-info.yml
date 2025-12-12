@@ -196,15 +196,18 @@ jobs:
           echo ""
           echo "--- CA Certificate Check ---"
           echo "Fireactions Registry Cache CA:"
-          # Check for the actual certificate file written by cloud-init write_files
-          # Note: We check the source file, not the bundle (which is Base64-encoded)
-          if [ -f /usr/local/share/ca-certificates/fireactions-registry-cache.crt ]; then
-            echo "✅ CA certificate file exists"
+          # Check for certificate file written by cloud-init ca_certs module
+          # ca_certs writes to /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt
+          CA_CERT=$(ls /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt 2>/dev/null | head -1)
+          if [ -n "$CA_CERT" ]; then
+            echo "✅ CA certificate file exists: $CA_CERT"
             echo "Certificate subject:"
-            openssl x509 -in /usr/local/share/ca-certificates/fireactions-registry-cache.crt -noout -subject 2>/dev/null || echo "  (could not parse)"
+            openssl x509 -in "$CA_CERT" -noout -subject 2>/dev/null || echo "  (could not parse)"
           else
-            echo "⚠️ CA certificate file NOT found at /usr/local/share/ca-certificates/fireactions-registry-cache.crt"
-            echo "  This means cloud-init write_files hasn't run yet (race condition) or registry-cache is not enabled"
+            echo "⚠️ CA certificate file NOT found at /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt"
+            echo "  This means cloud-init ca_certs module hasn't run yet or registry-cache is not enabled"
+            echo "  Contents of /usr/local/share/ca-certificates/:"
+            ls -la /usr/local/share/ca-certificates/ 2>/dev/null || echo "  (directory doesn't exist)"
           fi
 
           echo ""
@@ -285,8 +288,8 @@ jobs:
             echo "| DNS Nameserver | ⚠️ Using $NS |" >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Check CA certificate (check file existence, not bundle grep)
-          if [ -f /usr/local/share/ca-certificates/fireactions-registry-cache.crt ]; then
+          # Check CA certificate (ca_certs module writes to cloud-init-ca-cert-*.crt)
+          if ls /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt >/dev/null 2>&1; then
             echo "| CA Certificate | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| CA Certificate | ❌ Not found |" >> $GITHUB_STEP_SUMMARY
