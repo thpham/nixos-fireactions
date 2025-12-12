@@ -75,13 +75,26 @@ if registry_cache_enabled and "pools" in config:
         # Add certificate lines with 6-space indent (under the block scalar)
         for line in ca_cert_raw.split('\n'):
             user_data_lines.append(f"      {line}")
-        # Add runcmd section for DNS and hostname configuration only
-        # (update-ca-certificates is handled by ca_certs module above)
+        # Add runcmd section for:
+        # 1. Fixing CA bundle (Ubuntu 24.04 bug: ca_certs creates symlinks but doesn't update bundle)
+        # 2. DNS configuration
+        # 3. Hostname configuration
         user_data_lines.extend([
             "",
-            "# Runtime configuration via runcmd (DNS and hostname only)",
+            "# Runtime configuration via runcmd",
             "runcmd:",
+            "  # Fix Ubuntu 24.04 bug: ca_certs module creates hash symlinks but doesn't",
+            "  # add cert to /etc/ssl/certs/ca-certificates.crt bundle file.",
+            "  # curl/docker use the bundle file, not symlinks, so we must append manually.",
+            "  - |",
+            "    CA_CERT=$(ls /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt 2>/dev/null | head -1)",
+            '    if [ -n "$CA_CERT" ] && ! grep -q "Fireactions Registry Cache CA" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then',
+            '      cat "$CA_CERT" >> /etc/ssl/certs/ca-certificates.crt',
+            '      echo "Appended CA cert to bundle: $CA_CERT"',
+            "    fi",
+            "  # Set DNS to use host gateway (registry cache proxy)",
             f"  - echo 'nameserver {gateway}' > /etc/resolv.conf",
+            "  # Set hostname from MMDS metadata",
             "  - |",
             "    RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireactions/runner_id)",
             '    if [ -n "$RUNNER_ID" ]; then',

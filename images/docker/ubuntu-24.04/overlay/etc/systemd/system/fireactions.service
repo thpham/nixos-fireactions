@@ -1,10 +1,14 @@
 [Unit]
 Description=Fireactions
 Documentation=https://github.com/hostinger/fireactions
-# Wait for cloud-init.service which runs ca_certs module
-# ca_certs handles both writing the cert AND running update-ca-certificates
+# Wait for cloud-config.service which runs runcmd
+# Timeline:
+# 1. cloud-init.service (init stage): ca_certs writes cert + creates symlinks
+# 2. cloud-config.service (config stage): runcmd appends cert to bundle file
+#    (workaround for Ubuntu 24.04 bug where ca_certs doesn't update bundle)
+# 3. Fireactions starts with CA bundle containing our cert
 # After= is ignored if service doesn't exist (e.g., no cloud-init installed)
-After=network.target cloud-init.service
+After=network.target cloud-config.service
 SuccessAction=reboot
 
 [Service]
