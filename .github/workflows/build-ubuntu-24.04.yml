@@ -1,6 +1,8 @@
 name: Build Ubuntu 24.04 Base Image
 
 on:
+  schedule:
+    - cron: '0 3 * * 0'  # Weekly on Sunday at 3 AM UTC - cleanup orphaned images
   workflow_dispatch:
     inputs:
       version:
@@ -162,3 +164,28 @@ jobs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Architectures:** \`amd64\`, \`arm64\`" >> $GITHUB_STEP_SUMMARY
+
+  # Cleanup orphaned images (runs weekly on schedule)
+  # Removes untagged manifests while preserving multi-arch platform images
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    permissions:
+      packages: write
+    steps:
+      - name: Delete orphaned images
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          package: fireactions-images/ubuntu-24.04
+          delete-untagged: true
+          delete-ghost-images: true
+          delete-partial-images: true
+          older-than: 7 days
+          keep-n-tagged: 5
+
+      - name: Summary
+        run: |
+          echo "## GHCR Cleanup Completed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Removed orphaned/untagged images from \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
