@@ -21,6 +21,15 @@ on:
           - transparent # Uses docker driver - transparent for docker.io via daemon.json
           - zot-cache # Uses pre-configured builder - all registries cached
           - default # Default buildx behavior - no caching
+      platforms:
+        description: "Target platforms (multi-platform requires zot-cache mode)"
+        required: true
+        default: "linux/amd64,linux/arm64"
+        type: choice
+        options:
+          - linux/amd64
+          - linux/arm64
+          - linux/amd64,linux/arm64
 
 # ============================================================================
 # REGISTRY CACHE OPTIONS FOR FIREACTIONS RUNNERS
@@ -68,11 +77,11 @@ jobs:
         if: inputs.buildx_mode == 'zot-cache'
         uses: docker/setup-buildx-action@v3
         with:
-          name: zot-cache
           driver: docker-container
-          # The 'zot-cache' builder is created by cloud-init with /etc/buildkit/buildkitd.toml
-          # This enables caching for: docker.io, ghcr.io, quay.io, gcr.io
-          # Full BuildKit features available
+          buildkitd-config: /etc/buildkit/buildkitd.toml
+          # Explicit config ensures registry mirrors are applied
+          # Caches: docker.io, ghcr.io, quay.io, gcr.io
+          # Full BuildKit features: multi-platform, cache export, etc.
 
       # Option 3: DEFAULT - Standard buildx (no cache optimization)
       - name: Set up Docker Buildx (default mode)
@@ -85,12 +94,15 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.example
+          platforms: ${{ inputs.platforms }}
           push: false
-          load: true
+          # load only works for single-platform builds
+          load: ${{ !contains(inputs.platforms, ',') }}
           tags: test-app:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Run built container
+        if: ${{ !contains(inputs.platforms, ',') }}
         run: |
           docker run --rm test-app:latest
