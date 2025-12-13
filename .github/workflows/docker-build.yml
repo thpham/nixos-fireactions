@@ -61,6 +61,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # QEMU is required for cross-platform builds (e.g., arm64 on amd64 host)
+      - name: Set up QEMU
+        if: contains(inputs.platforms, ',') || inputs.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@v3
+
       # Option 1: TRANSPARENT - Uses docker driver (respects daemon.json)
       # This is truly transparent - docker.io pulls go through Zot cache automatically
       - name: Set up Docker Buildx (transparent mode)
