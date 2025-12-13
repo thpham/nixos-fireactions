@@ -107,6 +107,7 @@
             firecracker-kernel = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel.nix { };
             firecracker-kernel-custom = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel-custom.nix { };
             tc-redirect-tap = pkgsWithOverlays.callPackage ./pkgs/tc-redirect-tap.nix { };
+            zot = pkgsWithOverlays.callPackage ./pkgs/zot.nix { };
             default = pkgsWithOverlays.callPackage ./pkgs/fireactions.nix { };
           }
           // {
@@ -188,6 +189,7 @@
         firecracker-kernel = final.callPackage ./pkgs/firecracker-kernel.nix { };
         firecracker-kernel-custom = final.callPackage ./pkgs/firecracker-kernel-custom.nix { };
         tc-redirect-tap = final.callPackage ./pkgs/tc-redirect-tap.nix { };
+        zot = final.callPackage ./pkgs/zot.nix { };
       };
 
       # NixOS configurations for deployment via nixos-anywhere

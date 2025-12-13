@@ -180,6 +180,39 @@ jobs:
           echo "=== Registry Cache Validation ==="
 
           echo ""
+          echo "--- Containerd Registry Mirrors ---"
+          echo "Contents of /etc/containerd/certs.d/:"
+          ls -la /etc/containerd/certs.d/ 2>/dev/null || echo "  Directory doesn't exist"
+          for d in /etc/containerd/certs.d/*/; do
+            if [ -d "$d" ]; then
+              echo "  $d:"
+              cat "${d}hosts.toml" 2>/dev/null | head -10 || echo "    No hosts.toml"
+            fi
+          done
+
+          echo ""
+          echo "--- BuildKit Config ---"
+          if [ -f /etc/buildkit/buildkitd.toml ]; then
+            echo "  /etc/buildkit/buildkitd.toml exists:"
+            cat /etc/buildkit/buildkitd.toml
+          else
+            echo "  /etc/buildkit/buildkitd.toml not found"
+          fi
+
+          echo ""
+          echo "--- Docker Daemon Config ---"
+          if [ -f /etc/docker/daemon.json ]; then
+            echo "  /etc/docker/daemon.json:"
+            cat /etc/docker/daemon.json
+          else
+            echo "  /etc/docker/daemon.json not found"
+          fi
+
+          echo ""
+          echo "--- Buildx Builders ---"
+          docker buildx ls 2>/dev/null || echo "  Buildx not available"
+
+          echo ""
           echo "--- DNS Configuration ---"
           echo "resolv.conf contents:"
           cat /etc/resolv.conf
@@ -194,76 +227,9 @@ jobs:
           nslookup docker.io || dig docker.io +short || host docker.io || echo "DNS lookup tools not available"
 
           echo ""
-          echo "--- CA Certificate Check ---"
-          echo "Fireactions Registry Cache CA:"
-          # Check for certificate file written by cloud-init ca_certs module
-          # ca_certs writes to /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt
-          CA_CERT=$(ls /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt 2>/dev/null | head -1)
-          if [ -n "$CA_CERT" ]; then
-            echo "✅ CA certificate file exists: $CA_CERT"
-            echo "Certificate subject:"
-            openssl x509 -in "$CA_CERT" -noout -subject 2>/dev/null || echo "  (could not parse)"
-          else
-            echo "⚠️ CA certificate file NOT found at /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt"
-            echo "  This means cloud-init ca_certs module hasn't run yet or registry-cache is not enabled"
-            echo "  Contents of /usr/local/share/ca-certificates/:"
-            ls -la /usr/local/share/ca-certificates/ 2>/dev/null || echo "  (directory doesn't exist)"
-          fi
-
-          echo ""
-          echo "--- CA Bundle Verification ---"
-          echo "Checking if CA is in system trust bundle..."
-          if grep -q "Fireactions Registry Cache CA" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
-            echo "✅ CA certificate IS in /etc/ssl/certs/ca-certificates.crt"
-          else
-            echo "❌ CA certificate NOT in /etc/ssl/certs/ca-certificates.crt"
-            echo "  This means update-ca-certificates didn't add it to the bundle!"
-          fi
-
-          echo ""
-          echo "Hash symlinks in /etc/ssl/certs/:"
-          ls -la /etc/ssl/certs/ | grep -i "cloud-init\|fireactions" || echo "  No cloud-init/fireactions symlinks found"
-
-          echo ""
           echo "--- OpenSSL TLS Debug ---"
           echo "Testing TLS handshake to ghcr.io via openssl s_client:"
           echo | timeout 10 openssl s_client -connect ghcr.io:443 -servername ghcr.io 2>&1 | head -30 || echo "  openssl s_client failed"
-
-          echo ""
-          echo "--- curl CA Bundle Path ---"
-          echo "curl's default CA bundle:"
-          curl --version 2>/dev/null | grep -i "ssl\|tls\|ca" || true
-          echo "CURL_CA_BUNDLE env: ${CURL_CA_BUNDLE:-not set}"
-          echo "SSL_CERT_FILE env: ${SSL_CERT_FILE:-not set}"
-          echo "SSL_CERT_DIR env: ${SSL_CERT_DIR:-not set}"
-
-          echo ""
-          echo "--- /etc/ca-certificates.conf check (blank line bug) ---"
-          echo "Looking for cloud-init entries and blank lines:"
-          grep -n "cloud-init" /etc/ca-certificates.conf 2>/dev/null || echo "  No cloud-init entries found"
-          echo ""
-          echo "Last 10 lines of /etc/ca-certificates.conf:"
-          tail -10 /etc/ca-certificates.conf 2>/dev/null | cat -A || echo "  File not found"
-          echo ""
-          echo "Checking for blank lines before cloud-init entry (known bug LP#1077020):"
-          if grep -B1 "cloud-init" /etc/ca-certificates.conf 2>/dev/null | grep -q "^$"; then
-            echo "⚠️ BLANK LINE FOUND before cloud-init entry - this causes the cert to be ignored!"
-          else
-            echo "✅ No blank line issue detected"
-          fi
-
-          echo ""
-          echo "--- update-ca-certificates status ---"
-          echo "Re-running update-ca-certificates --fresh to force regeneration:"
-          sudo update-ca-certificates --fresh 2>&1 | tail -20 || echo "  update-ca-certificates failed"
-
-          echo ""
-          echo "After fresh update, checking bundle again:"
-          if grep -q "Fireactions Registry Cache CA" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then
-            echo "✅ CA certificate IS NOW in bundle after fresh update"
-          else
-            echo "❌ CA certificate STILL NOT in bundle even after fresh update"
-          fi
 
           echo ""
           echo "--- HTTPS Connectivity Test ---"
@@ -343,11 +309,39 @@ jobs:
             echo "| DNS Nameserver | ⚠️ Using $NS |" >> $GITHUB_STEP_SUMMARY
           fi
 
+          # Check containerd hosts.toml
+          if ls /etc/containerd/certs.d/docker.io/hosts.toml >/dev/null 2>&1; then
+            echo "| Containerd Mirrors | ✅ Configured |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Containerd Mirrors | ❌ Not found |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check BuildKit config
+          if [ -f /etc/buildkit/buildkitd.toml ]; then
+            echo "| BuildKit Config | ✅ Present |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| BuildKit Config | ❌ Not found |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check Docker daemon.json
+          if [ -f /etc/docker/daemon.json ] && grep -q "registry-mirrors" /etc/docker/daemon.json 2>/dev/null; then
+            echo "| Docker Daemon | ✅ Mirror configured |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Docker Daemon | ⚠️ No mirror config |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Check zot-cache builder
+          if docker buildx inspect zot-cache >/dev/null 2>&1; then
+            echo "| Buildx zot-cache | ✅ Builder ready |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Buildx zot-cache | ❌ Not created |" >> $GITHUB_STEP_SUMMARY
+          fi
+
           # Check CA certificate (ca_certs module writes to cloud-init-ca-cert-*.crt)
           if ls /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt >/dev/null 2>&1; then
             echo "| CA Certificate | ✅ Installed |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| CA Certificate | ❌ Not found |" >> $GITHUB_STEP_SUMMARY
+            echo "| CA Certificate | ⚠️ Not needed (SSL splice mode) |" >> $GITHUB_STEP_SUMMARY
           fi
 
           # Check HTTPS connectivity (check HTTP status code, not just curl exit)

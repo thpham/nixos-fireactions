@@ -446,22 +446,19 @@ in
       };
     };
 
-    # Add registry mirrors to containerd when registry cache is enabled
-    # This allows the host's containerd to use the cache for pulling runner images
+    # Add registry mirrors to containerd when Zot is enabled
+    # This allows the host's containerd to use the Zot cache for pulling runner images
     virtualisation.containerd.settings.plugins."io.containerd.grpc.v1.cri".registry.mirrors =
-      lib.mkIf registryCacheCfg.enable
+      lib.mkIf (registryCacheCfg.enable && registryCacheCfg.zot.enable)
         (
-          lib.listToAttrs (
-            map (
-              registry:
-              let
-                # Handle docker.io special case
-                mirrorKey = if registry == "docker.io" then "docker.io" else registry;
-                endpoint = "http://${registryCacheCfg._internal.gateway}:3128";
-              in
-              lib.nameValuePair mirrorKey { endpoint = [ endpoint ]; }
-            ) registryCacheCfg.registries
-          )
+          lib.mapAttrs' (
+            name: _mirror:
+            let
+              # Zot serves mirrors under namespace paths: http://gateway:5000/v2/<registry>/
+              endpoint = "http://${registryCacheCfg._internal.gateway}:${toString registryCacheCfg._internal.zotPort}";
+            in
+            lib.nameValuePair name { endpoint = [ endpoint ]; }
+          ) registryCacheCfg._internal.zotMirrors
         );
 
     # Add required tools to containerd's PATH for devmapper snapshotter
@@ -638,8 +635,8 @@ in
         # Restart when base config changes (e.g., pool settings, organization)
         restartTriggers = [ configFile ];
 
-        # Wait for registry-cache CA to be generated
-        after = lib.optional needsRegistryCache "registry-cache-ca-setup.service";
+        # Wait for registry-cache CA to be generated (only if SSL bump is enabled)
+        after = lib.optional (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") "registry-cache-ca-setup.service";
 
         serviceConfig = {
           Type = "oneshot";
@@ -666,8 +663,8 @@ in
             fi
           ''}
 
-          ${lib.optionalString needsRegistryCache ''
-            # Verify the registry-cache CA cert exists
+          ${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") ''
+            # Verify the registry-cache CA cert exists (only needed for SSL bump)
             if [ ! -f "${registryCacheCfg._internal.caCertPath}" ]; then
               echo "ERROR: Registry cache CA certificate not found: ${registryCacheCfg._internal.caCertPath}"
               exit 1
@@ -679,10 +676,22 @@ in
           export PRIVATE_KEY_FILE="${
             lib.optionalString (cfg.github.appPrivateKeyFile != null) cfg.github.appPrivateKeyFile
           }"
-          export REGISTRY_CACHE_ENABLED="${lib.boolToString needsRegistryCache}"
-          export REGISTRY_CACHE_CA_FILE="${lib.optionalString needsRegistryCache registryCacheCfg._internal.caCertPath}"
+
+          # Registry cache configuration
           export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.gateway}"
-          export DEBUG_SSH_KEY_FILE="${lib.optionalString (registryCacheCfg._internal.debugSshKeyFile != null) registryCacheCfg._internal.debugSshKeyFile}"
+          export DEBUG_SSH_KEY_FILE="${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.debugSshKeyFile != null) registryCacheCfg._internal.debugSshKeyFile}"
+
+          # Zot registry mirror configuration
+          export ZOT_ENABLED="${lib.boolToString (needsRegistryCache && registryCacheCfg.zot.enable)}"
+          export ZOT_PORT="${lib.optionalString needsRegistryCache (toString registryCacheCfg._internal.zotPort)}"
+          export ZOT_MIRRORS='${lib.optionalString needsRegistryCache (builtins.toJSON (
+            lib.mapAttrs (name: mirror: { url = mirror.url; }) registryCacheCfg._internal.zotMirrors
+          ))}'
+
+          # Squid SSL bump configuration
+          export SQUID_SSL_BUMP_MODE="${lib.optionalString needsRegistryCache registryCacheCfg._internal.squidSslBumpMode}"
+          export SQUID_SSL_BUMP_DOMAINS="${lib.optionalString needsRegistryCache (lib.concatStringsSep "," registryCacheCfg._internal.squidSslBumpDomains)}"
+          export SQUID_CA_FILE="${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") registryCacheCfg._internal.caCertPath}"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./fireactions-inject-secrets.py}
 
@@ -710,9 +719,11 @@ in
           "containerd.service"
           "fireactions-kernel-setup.service"
         ]
-        ++ lib.optional needsConfigService "fireactions-config.service";
+        ++ lib.optional needsConfigService "fireactions-config.service"
+        ++ lib.optional (registryCacheCfg.enable && registryCacheCfg.zot.enable) "zot.service";
         requires = [ "containerd.service" ] ++ lib.optional needsConfigService "fireactions-config.service";
-        wants = [ "network-online.target" ];
+        wants = [ "network-online.target" ]
+        ++ lib.optional (registryCacheCfg.enable && registryCacheCfg.zot.enable) "zot.service";
 
         # Restart when config changes
         restartTriggers = [ configFile ];

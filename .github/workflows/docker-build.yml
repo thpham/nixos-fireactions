@@ -12,6 +12,37 @@ on:
           - small
           - medium
           - large
+      buildx_mode:
+        description: "Buildx configuration mode"
+        required: true
+        default: "zot-cache"
+        type: choice
+        options:
+          - transparent # Uses docker driver - transparent for docker.io via daemon.json
+          - zot-cache # Uses pre-configured builder - all registries cached
+          - default # Default buildx behavior - no caching
+
+# ============================================================================
+# REGISTRY CACHE OPTIONS FOR FIREACTIONS RUNNERS
+# ============================================================================
+# Fireactions VMs come with Zot registry cache pre-configured. Choose your mode:
+#
+# 1. TRANSPARENT (docker driver) - No workflow changes needed for docker.io
+#    - Uses Docker daemon's registry-mirrors from /etc/docker/daemon.json
+#    - Works for docker.io (Docker Hub) pulls only
+#    - No multi-platform builds (arm64, etc.)
+#    - Best for: Simple single-platform builds
+#
+# 2. ZOT-CACHE (pre-configured builder) - All registries cached
+#    - Uses pre-created 'zot-cache' builder with /etc/buildkit/buildkitd.toml
+#    - Caches: docker.io, ghcr.io, quay.io, gcr.io
+#    - Full BuildKit features (multi-platform, cache export, etc.)
+#    - Requires: name: zot-cache in setup-buildx-action
+#
+# 3. DEFAULT - Standard buildx behavior
+#    - No registry caching, pulls directly from upstream
+#    - Useful for comparison/debugging
+# ============================================================================
 
 jobs:
   build:
@@ -21,10 +52,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      # Option 1: TRANSPARENT - Uses docker driver (respects daemon.json)
+      # This is truly transparent - docker.io pulls go through Zot cache automatically
+      - name: Set up Docker Buildx (transparent mode)
+        if: inputs.buildx_mode == 'transparent'
         uses: docker/setup-buildx-action@v3
-        # Using default docker-container driver with BuildKit
-        # Requires custom kernel with CONFIG_IP_NF_RAW for bridge networking
+        with:
+          driver: docker
+          # docker driver uses Docker daemon directly, which reads /etc/docker/daemon.json
+          # Our daemon.json has: "registry-mirrors": ["http://10.200.0.1:5000"]
+          # Limitation: Only works for docker.io, no multi-platform builds
+
+      # Option 2: ZOT-CACHE - Uses pre-configured builder with all registries
+      - name: Set up Docker Buildx (zot-cache mode)
+        if: inputs.buildx_mode == 'zot-cache'
+        uses: docker/setup-buildx-action@v3
+        with:
+          name: zot-cache
+          driver: docker-container
+          # The 'zot-cache' builder is created by cloud-init with /etc/buildkit/buildkitd.toml
+          # This enables caching for: docker.io, ghcr.io, quay.io, gcr.io
+          # Full BuildKit features available
+
+      # Option 3: DEFAULT - Standard buildx (no cache optimization)
+      - name: Set up Docker Buildx (default mode)
+        if: inputs.buildx_mode == 'default'
+        uses: docker/setup-buildx-action@v3
+        # Creates a new builder without registry mirrors
 
       - name: Build multi-stage image
         uses: docker/build-push-action@v6
@@ -36,9 +90,7 @@ jobs:
           tags: test-app:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Using default bridge network - enabled by custom kernel
 
       - name: Run built container
         run: |
-          # Test with default bridge networking
           docker run --rm test-app:latest

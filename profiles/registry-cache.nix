@@ -1,12 +1,17 @@
 # Registry Cache Profile
 #
-# Enables transparent registry proxy cache for Firecracker VMs.
-# VMs pull images normally - DNS interception + MITM proxy makes caching invisible.
+# Enables hybrid caching for Firecracker VMs:
+# - Zot Registry: Pull-through cache for container registries (native OCI, no CA needed)
+# - Squid Proxy: HTTP/HTTPS caching with selective SSL bump
+#
+# Architecture:
+# - Container registry traffic: containerd → hosts.toml → Zot → upstream
+# - HTTP/HTTPS traffic: iptables REDIRECT → Squid → upstream
 #
 # Features:
-# - DNS interception (dnsmasq) redirects registry domains to local proxy
-# - Squid ssl-bump terminates TLS, caches content with LRU eviction
-# - Auto-generated CA certificate for TLS termination
+# - No CA certificate needed for registry pulls (native OCI protocol)
+# - Multi-stage Docker builds work out of the box
+# - Optional HTTPS caching for configured domains via Squid SSL bump
 # - 50GB cache with LRU eviction (configurable)
 #
 # Usage:
@@ -16,10 +21,12 @@
 #   Override options in host-specific config (hosts/<name>.nix):
 #     services.fireactions.registryCache = {
 #       storage.maxSize = "100GB";
-#       credentials."registry-1.docker.io" = {
-#         usernameFile = config.age.secrets.dockerhub-user.path;
-#         passwordFile = config.age.secrets.dockerhub-pass.path;
+#       # Add private registry
+#       zot.mirrors."harbor.corp" = {
+#         url = "https://harbor.internal.corp";
 #       };
+#       # Enable SSL bump for specific domains
+#       squid.sslBump.domains = [ "internal.corp" ];
 #     };
 { ... }:
 
@@ -31,18 +38,15 @@
   services.fireactions.registryCache = {
     enable = true;
 
-    # Default registries to cache
-    registries = [
-      "ghcr.io"
-      "docker.io"
-      "quay.io"
-      "gcr.io"
-    ];
+    # Zot registry pull-through cache (default registries are already configured)
+    # zot.mirrors defaults to: docker.io, ghcr.io, quay.io, gcr.io
+
+    # Squid HTTP/HTTPS cache with selective SSL bump
+    # squid.sslBump.mode = "selective" (default - splice all HTTPS unless domains configured)
+    # squid.sslBump.domains = []; (default - no HTTPS interception)
 
     # Default storage settings
-    storage = {
-      maxSize = "50GB";
-      memoryCache = "2GB";
-    };
+    storage.maxSize = "50GB";
+    squid.memoryCache = "256MB";
   };
 }

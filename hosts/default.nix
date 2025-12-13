@@ -138,8 +138,11 @@ in
   meta = {
     nixpkgs = pkgs;
 
-    # Per-node nixpkgs based on target system
-    nodeNixpkgs = lib.mapAttrs (_name: hostDef: import nixpkgs { system = hostDef.system; }) registry;
+    # Per-node nixpkgs based on target system, with our overlay for custom packages
+    nodeNixpkgs = lib.mapAttrs (_name: hostDef: import nixpkgs {
+      system = hostDef.system;
+      overlays = [ self.overlays.default ];
+    }) registry;
 
     specialArgs = { inherit self; };
   };
