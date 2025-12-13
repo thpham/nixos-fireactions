@@ -49,6 +49,20 @@
         # Restart fireactions when secret changes
         restartUnits = [ "fireactions-config.service" ];
       };
+
+      # Debug SSH key for VM access (optional, used by dev profile)
+      "debug-ssh-key" = {
+        # Path in secrets.yaml: debug_ssh_key
+        key = "debug_ssh_key";
+
+        # Permissions
+        mode = "0400";
+        owner = "root";
+        group = "root";
+
+        # Restart fireactions-config to regenerate cloud-init user-data
+        restartUnits = [ "fireactions-config.service" ];
+      };
     };
   };
 }

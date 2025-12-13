@@ -682,6 +682,7 @@ in
           export REGISTRY_CACHE_ENABLED="${lib.boolToString needsRegistryCache}"
           export REGISTRY_CACHE_CA_FILE="${lib.optionalString needsRegistryCache registryCacheCfg._internal.caCertPath}"
           export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.gateway}"
+          export DEBUG_SSH_KEY_FILE="${lib.optionalString (registryCacheCfg._internal.debugSshKeyFile != null) registryCacheCfg._internal.debugSshKeyFile}"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./fireactions-inject-secrets.py}
 

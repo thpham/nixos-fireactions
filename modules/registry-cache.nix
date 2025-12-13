@@ -2,13 +2,20 @@
 #
 # This module provides a fully transparent caching proxy for container registries.
 # VMs pull images normally (e.g., `docker pull ghcr.io/...`) without any explicit
-# proxy configuration - DNS interception + MITM proxy makes caching invisible.
+# proxy configuration - iptables interception + MITM proxy makes caching invisible.
+#
+# Architecture:
+# 1. VMs resolve registry domains to their real IPs (via upstream DNS)
+# 2. iptables PREROUTING intercepts HTTPS traffic from VM bridge and REDIRECTs to Squid
+# 3. Squid uses SO_ORIGINAL_DST to get the real destination and performs SSL bump
+# 4. Cached responses are served from Squid; cache misses go to upstream registries
 #
 # Components:
-# - dnsmasq: DNS interception redirecting registry domains to local proxy
+# - dnsmasq: DHCP server for VMs (DNS forwarded to upstream, no interception)
+# - iptables: REDIRECT rule to intercept HTTPS traffic from VMs
 # - Squid: SSL-bump MITM proxy with LRU caching
 # - CA generation: Auto-generated CA certificate for TLS termination
-# - Cloud-init integration: CA + DNS injected via MMDS at VM boot
+# - Cloud-init integration: CA certificate injected via MMDS at VM boot
 {
   config,
   lib,
@@ -55,21 +62,10 @@ let
   storageSizeMB = parseSizeToMB cfg.storage.maxSize;
   memoryCacheMB = parseSizeToMB cfg.storage.memoryCache;
 
-  # Generate dnsmasq address entries for registry interception
-  dnsmasqAddresses = map (
-    registry:
-    # Handle docker.io special case (actual domain is registry-1.docker.io)
-    if registry == "docker.io" then
-      [
-        "/docker.io/${gateway}"
-        "/registry-1.docker.io/${gateway}"
-      ]
-    else
-      [ "/${registry}/${gateway}" ]
-  ) cfg.registries;
-
-  # Flatten the list of addresses
-  flatDnsmasqAddresses = lib.flatten dnsmasqAddresses;
+  # Note: We use iptables REDIRECT for transparent interception, NOT DNS overrides.
+  # DNS-based interception (pointing registry domains to Squid IP) doesn't work
+  # because Squid's intercept mode verifies Host headers against destination IPs.
+  # With iptables, Squid can retrieve the original destination via SO_ORIGINAL_DST.
 
   # Generate Squid ACL domains
   squidDomains = lib.concatStringsSep " " (
@@ -90,17 +86,17 @@ let
     # ========================================
     # NETWORK CONFIGURATION
     # ========================================
-    # Listen on the gateway IP for intercepted HTTPS traffic
-    http_port ${gateway}:3128
-    https_port ${gateway}:443 intercept ssl-bump \
+    # Listen on gateway IP for intercepted traffic
+    # iptables REDIRECT sends traffic here from the VM bridge interface
+    http_port ${gateway}:3128 intercept
+    https_port ${gateway}:3129 intercept ssl-bump \
       generate-host-certificates=on \
       dynamic_cert_mem_cache_size=512MB \
       cert=${caCertPath} \
       key=${caKeyPath}
 
-    # CRITICAL: Use upstream DNS directly to avoid loop
-    # Without this, Squid would use system resolver (dnsmasq) which
-    # redirects registry domains back to us (10.200.0.1) → infinite loop
+    # Use upstream DNS servers directly
+    # This avoids any potential issues with local resolver configuration
     dns_nameservers ${squidDnsServers}
 
     # Certificate generator helper
@@ -115,22 +111,28 @@ let
     acl registries dstdomain ${squidDomains}
     acl localnet src ${fireactionsCfg.networking.subnet}
     acl SSL_ports port 443
-    acl Safe_ports port 443
+    acl Safe_ports port 80 443
 
     # Allow only local network
     http_access allow localnet
     http_access deny all
 
-    # SSL bump all traffic
-    # In our DNS-override architecture, only registry domains resolve to the
-    # gateway IP (10.200.0.1). Therefore ALL traffic arriving at port 443 is
-    # registry traffic by definition - no need to filter by domain ACL.
+    # SSL bump configuration
+    # We use peek-then-bump to properly mimic server certificates with SANs.
+    # Without peek, Squid generates certs with only CN (no SANs), which
+    # modern clients (Go 1.15+, Docker) reject.
     #
-    # Note: We use "bump all" instead of "bump registries" because at ssl_bump
-    # step1, Squid hasn't parsed the TLS ClientHello yet and doesn't know the
-    # SNI. Using dstdomain ACL here would fail. Since DNS already filters for
-    # us, bumping all traffic is correct and simpler.
-    ssl_bump bump all
+    # Steps:
+    # 1. step1: Peek at ClientHello to get SNI, initiate connection to server
+    # 2. step2: Stare at server certificate to get its properties (including SANs)
+    # 3. step3: Bump (generate fake cert mimicking server cert with SANs)
+    acl step1 at_step SslBump1
+    acl step2 at_step SslBump2
+    acl step3 at_step SslBump3
+
+    ssl_bump peek step1
+    ssl_bump stare step2
+    ssl_bump bump step3
 
     # ========================================
     # FRESHNESS POLICY (refresh_pattern)
@@ -365,6 +367,27 @@ in
       };
     };
 
+    # Debug options for VM access
+    debug = {
+      sshKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          Path to file containing SSH public key for VM debugging access.
+          When set, this key is injected into VMs via cloud-init.
+
+          For Colmena deployments, use deployment.keys to transfer the key:
+
+          deployment.keys.debug-ssh-key = {
+            text = "ssh-ed25519 AAAA... your-key";
+            destDir = "/run/keys";
+          };
+          services.fireactions.registryCache.debug.sshKeyFile = "/run/keys/debug-ssh-key";
+        '';
+        example = "/run/keys/debug-ssh-key";
+      };
+    };
+
     # Internal options (set by this module, used by fireactions-node.nix)
     _internal = {
       caCertPath = lib.mkOption {
@@ -387,11 +410,21 @@ in
         default = cloudInitUserData;
         description = "Cloud-init user-data template (set automatically)";
       };
+
+      debugSshKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        internal = true;
+        default = cfg.debug.sshKeyFile;
+        description = "Path to debug SSH key file (set automatically from debug.sshKeyFile)";
+      };
     };
   };
 
   config = lib.mkIf (fireactionsCfg.enable && cfg.enable) {
-    # DNS interception and DHCP via dnsmasq
+    # DNS and DHCP via dnsmasq
+    # Note: We do NOT override registry domain IPs here - we use iptables REDIRECT instead.
+    # DNS-based interception doesn't work because Squid's intercept mode verifies
+    # Host headers against destination IPs (client_dst_passthru limitation).
     services.dnsmasq = {
       enable = true;
       settings = {
@@ -402,10 +435,9 @@ in
         # Don't use /etc/resolv.conf
         no-resolv = true;
 
-        # Override registry domains -> point to local proxy
-        address = flatDnsmasqAddresses;
-
-        # Forward other queries to upstream DNS
+        # Forward all queries to upstream DNS (no registry overrides)
+        # VMs will resolve registry domains to their real IPs
+        # iptables will intercept and redirect the traffic to Squid
         server = cfg.dns.upstreamServers;
 
         # Cache DNS responses
@@ -605,12 +637,44 @@ in
     };
     users.groups.squid = { };
 
-    # Firewall: allow DNS and HTTPS from VM subnet
+    # Firewall: allow DNS and Squid ports from VM subnet
     networking.firewall = {
       interfaces.${fireactionsCfg.networking.bridgeName} = {
-        allowedTCPPorts = [ 443 ];
-        allowedUDPPorts = [ 53 ];
+        allowedTCPPorts = [ 3128 3129 ];
+        allowedUDPPorts = [ 53 67 ];  # DNS + DHCP
       };
+    };
+
+    # iptables NAT rules to intercept HTTP/HTTPS traffic from VMs
+    # This redirects web traffic from VMs to Squid's intercept ports
+    # Squid then uses SO_ORIGINAL_DST to get the real destination
+    networking.nat = {
+      enable = true;
+      internalInterfaces = [ fireactionsCfg.networking.bridgeName ];
+      # PREROUTING: Redirect HTTP/HTTPS traffic from VMs to Squid intercept ports
+      # Only redirect traffic NOT destined for the gateway itself
+      extraCommands = ''
+        # Redirect HTTP (80) from VM subnet to Squid intercept port (3128)
+        iptables -t nat -A PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
+          -p tcp --dport 80 \
+          ! -d ${gateway} \
+          -j REDIRECT --to-port 3128
+        # Redirect HTTPS (443) from VM subnet to Squid intercept port (3129)
+        iptables -t nat -A PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
+          -p tcp --dport 443 \
+          ! -d ${gateway} \
+          -j REDIRECT --to-port 3129
+      '';
+      extraStopCommands = ''
+        iptables -t nat -D PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
+          -p tcp --dport 80 \
+          ! -d ${gateway} \
+          -j REDIRECT --to-port 3128 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
+          -p tcp --dport 443 \
+          ! -d ${gateway} \
+          -j REDIRECT --to-port 3129 2>/dev/null || true
+      '';
     };
 
     # Logrotate for registry-cache logs

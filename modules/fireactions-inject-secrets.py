@@ -75,9 +75,31 @@ if registry_cache_enabled and "pools" in config:
         # Add certificate lines with 6-space indent (under the block scalar)
         for line in ca_cert_raw.split('\n'):
             user_data_lines.append(f"      {line}")
+
+        # Add SSH key for debugging (optional)
+        # Priority: DEBUG_SSH_KEY_FILE (for Colmena) > DEBUG_SSH_KEY env var
+        debug_ssh_key = None
+        debug_ssh_key_file = os.environ.get("DEBUG_SSH_KEY_FILE", "")
+        if debug_ssh_key_file:
+            with open(debug_ssh_key_file, "r") as f:
+                debug_ssh_key = f.read().strip()
+            print(f"Loaded debug SSH key from file: {debug_ssh_key_file}")
+        else:
+            debug_ssh_key = os.environ.get("DEBUG_SSH_KEY", "")
+
+        if debug_ssh_key:
+            user_data_lines.extend([
+                "",
+                "# SSH access for debugging",
+                "users:",
+                "  - name: root",
+                "    ssh_authorized_keys:",
+                f"      - {debug_ssh_key}",
+            ])
+
         # Add runcmd section for:
         # 1. Fixing CA bundle (Ubuntu 24.04 bug: ca_certs creates symlinks but doesn't update bundle)
-        # 2. DNS configuration
+        # 2. DNS configuration (point to host gateway for centralized DNS)
         # 3. Hostname configuration
         user_data_lines.extend([
             "",
@@ -90,9 +112,10 @@ if registry_cache_enabled and "pools" in config:
             "    CA_CERT=$(ls /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt 2>/dev/null | head -1)",
             '    if [ -n "$CA_CERT" ] && ! grep -q "Fireactions Registry Cache CA" /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then',
             '      cat "$CA_CERT" >> /etc/ssl/certs/ca-certificates.crt',
-            '      echo "Appended CA cert to bundle: $CA_CERT"',
+            '      update-ca-certificates --fresh',
+            '      echo "Appended CA cert to bundle and refreshed: $CA_CERT"',
             "    fi",
-            "  # Set DNS to use host gateway (registry cache proxy)",
+            "  # Set DNS to use host gateway (centralized DNS via dnsmasq)",
             f"  - echo 'nameserver {gateway}' > /etc/resolv.conf",
             "  # Set hostname from MMDS metadata",
             "  - |",
