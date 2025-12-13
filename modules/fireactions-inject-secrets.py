@@ -98,8 +98,18 @@ if (zot_enabled or gateway) and "pools" in config:
                     upstream_url = default_upstreams.get(registry_name, f"https://{registry_name}")
 
                 # Generate hosts.toml content
-                # The Zot mirror is accessed via HTTP at gateway:port/v2/<namespace>/
-                hosts_toml = f'''server = "{upstream_url}"
+                # docker.io images are stored at root paths in Zot (e.g., /library/alpine)
+                # Other registries use namespaced paths (e.g., /ghcr.io/owner/repo)
+                if registry_name == "docker.io":
+                    # Docker Hub: images at root, no path override needed
+                    hosts_toml = f'''server = "{upstream_url}"
+
+[host."http://{gateway}:{zot_port}"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true'''
+                else:
+                    # Other registries: images under /{registry_name}/, use override_path
+                    hosts_toml = f'''server = "{upstream_url}"
 
 [host."http://{gateway}:{zot_port}"]
   capabilities = ["pull", "resolve"]

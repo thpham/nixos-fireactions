@@ -174,6 +174,10 @@ let
   squidConfigFile = pkgs.writeText "squid.conf" squidConfig;
 
   # Zot configuration JSON
+  # NOTE: docker.io uses NO destination prefix because:
+  # - BuildKit sends requests like /v2/library/alpine/... (no registry prefix)
+  # - Other registries (ghcr.io, etc.) use destination prefix since containerd
+  #   hosts.toml with override_path=true handles the path rewriting
   zotConfig = {
     distSpecVersion = "1.1.0";
     storage = {
@@ -195,10 +199,14 @@ let
         registries = lib.mapAttrsToList (name: mirror: {
           urls = [ mirror.url ];
           content = [
-            {
+            ({
               prefix = mirror.prefix;
+            } // lib.optionalAttrs (name != "docker.io") {
+              # Only add destination prefix for non-Docker Hub registries
+              # Docker Hub images are stored at root (e.g., /library/alpine)
+              # so BuildKit can access them without path rewriting
               destination = "/${name}";
-            }
+            })
           ];
           onDemand = mirror.onDemand;
           tlsVerify = true;
