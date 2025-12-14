@@ -443,7 +443,7 @@ in
       };
     };
 
-    # Internal options (used by fireactions-node.nix)
+    # Internal options (used by services.nix)
     _internal = {
       gateway = lib.mkOption {
         type = lib.types.str;

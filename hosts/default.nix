@@ -95,7 +95,7 @@ let
         # Core modules (infrastructure)
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
-        self.nixosModules.fireactions-node
+        self.nixosModules.fireactions
 
         # Disk layout config (generates fileSystems/boot.loader from disko)
         # Actual partitioning only happens during nixos-anywhere initial deploy

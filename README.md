@@ -30,7 +30,7 @@ Add to your `flake.nix`:
     nixosConfigurations.my-runner = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        nixos-fireactions.nixosModules.fireactions-node
+        nixos-fireactions.nixosModules.fireactions
         {
           services.fireactions = {
             enable = true;
@@ -321,7 +321,11 @@ nixos-fireactions/
 ├── flake.nix                    # Flake definition
 ├── flake.lock                   # Lock file
 ├── modules/
-│   └── fireactions-node.nix     # NixOS module
+│   └── fireactions/             # NixOS module
+│       ├── default.nix          # Entry point + options
+│       ├── services.nix         # systemd services
+│       ├── registry-cache.nix   # Zot/Squid caching
+│       └── security/            # Security hardening
 ├── pkgs/
 │   ├── fireactions.nix                  # Main binary
 │   ├── firecracker-kernel.nix           # Upstream guest kernel (minimal)

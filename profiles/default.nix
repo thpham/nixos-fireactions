@@ -28,6 +28,9 @@ let
 
     # Infrastructure profiles
     registry-cache = ./registry-cache.nix;
+
+    # Security profiles
+    security-hardened = ./security-hardened.nix;
   };
 
   # Get profiles for a list of tags

@@ -31,9 +31,8 @@
 { ... }:
 
 {
-  imports = [
-    ../modules/registry-cache.nix
-  ];
+  # Note: registry-cache module is now part of the fireactions module
+  # No separate import needed - just set the options
 
   services.fireactions.registryCache = {
     enable = true;

@@ -1,5 +1,5 @@
 {
-  description = "fireactions-node - NixOS images for self-hosted GitHub Actions runners using Firecracker microVMs";
+  description = "NixOS module for self-hosted GitHub Actions runners using Firecracker microVMs";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -142,7 +142,7 @@
             ];
 
           shellHook = ''
-            echo "fireactions-node development shell (${system})"
+            echo "fireactions development shell (${system})"
             echo ""
           ''
           + lib.optionalString isLinux ''
@@ -179,8 +179,10 @@
     // {
       # NixOS module (not system-specific)
       nixosModules = {
-        fireactions-node = import ./modules/fireactions-node.nix;
-        default = self.nixosModules.fireactions-node;
+        fireactions = import ./modules/fireactions;
+        # Backwards compatibility alias
+        fireactions-node = self.nixosModules.fireactions;
+        default = self.nixosModules.fireactions;
       };
 
       # Overlay for use in other flakes
@@ -203,7 +205,7 @@
               inherit system;
               modules = [
                 disko.nixosModules.disko
-                self.nixosModules.fireactions-node
+                self.nixosModules.fireactions
                 ./deploy/configuration.nix
                 { disko.devices.disk.disk1.device = device; }
               ];
@@ -217,7 +219,7 @@
               modules = [
                 ./deploy/digitalocean.nix
                 disko.nixosModules.disko
-                self.nixosModules.fireactions-node
+                self.nixosModules.fireactions
                 { disko.devices.disk.disk1.device = "/dev/vda"; }
                 ./deploy/configuration.nix
                 # Let cloud-init set hostname (DO module sets it to "")
