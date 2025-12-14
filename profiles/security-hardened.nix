@@ -34,11 +34,11 @@
       blockCloudMetadata = true;
       rateLimitConnections = 100;
       allowedHostPorts = [
-        53    # DNS
-        67    # DHCP
-        3128  # Squid HTTP proxy
-        3129  # Squid HTTPS proxy
-        5000  # Zot registry
+        53 # DNS
+        67 # DHCP
+        3128 # Squid HTTP proxy
+        3129 # Squid HTTPS proxy
+        5000 # Zot registry
       ];
     };
 
@@ -47,7 +47,7 @@
       enable = true;
       secureDelete = {
         enable = true;
-        method = "discard";  # Use TRIM for SSDs
+        method = "discard"; # Use TRIM for SSDs
       };
       tmpfsSecrets.enable = true;
       # LUKS encryption enabled by default for security-hardened profile

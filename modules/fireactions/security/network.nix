@@ -53,14 +53,14 @@ in
       type = lib.types.bool;
       default = true;
       description = ''
-        Block access to HOST cloud metadata service (169.254.169.254).
+        Block VMs from accessing external cloud metadata services (169.254.169.254).
 
-        Prevents VMs from accessing the host's instance metadata, credentials,
-        or other sensitive cloud provider information (Azure IMDS, AWS IMDS, GCP).
+        This blocks access to AWS IMDS, Azure IMDS, GCP metadata, etc. when running
+        on cloud infrastructure. Prevents credential theft if a VM is compromised.
 
-        NOTE: This does NOT affect Firecracker MMDS (used by cloud-init inside VMs).
-        Firecracker MMDS is intercepted internally by Firecracker before traffic
-        reaches the network, so cloud-init metadata injection continues to work.
+        NOTE: This does NOT block Firecracker MMDS! The rules are in the forward
+        chain (routed traffic), while MMDS traffic goes to the input chain (local
+        host). Firecracker MMDS continues to work normally with this enabled.
       '';
     };
 
@@ -193,15 +193,21 @@ in
               udp dport { ${formatPorts networkCfg.allowedHostUdpPorts} } accept
           ''}
 
+          # Allow DHCP broadcast (client sends to 255.255.255.255:67)
+          iifname "${fireactionsCfg.networking.bridgeName}" ip daddr 255.255.255.255 udp dport 67 accept
+
           # Block VMs from accessing other host services
           iifname "${fireactionsCfg.networking.bridgeName}" ip daddr ${gatewayIp} \
             counter drop comment "Block unauthorized gateway access"
 
           # Block VMs from accessing host's external IP
           # (they should only communicate via gateway IP on bridge)
+          # Exceptions:
+          # - 169.254.0.0/16: Firecracker MMDS (metadata service)
+          # - 255.255.255.255: DHCP broadcast
           iifname "${fireactionsCfg.networking.bridgeName}" \
             ip daddr != ${gatewayIp} \
-            ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } \
+            ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 255.255.255.255 } \
             counter drop comment "Block VM to host external IP"
 
           ${networkCfg.additionalRules}

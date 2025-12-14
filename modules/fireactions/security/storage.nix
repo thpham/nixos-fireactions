@@ -235,17 +235,25 @@ in
       '';
     };
 
-    # Enhanced cleanup with LUKS close
+    # Enhanced cleanup with LUKS close when encryption is enabled
     # NOTE: Uses PATH-relative commands to avoid store path mismatches
+    # This override replaces the base service's ExecStop to add cryptsetup close
     systemd.services.containerd-devmapper-cleanup = lib.mkIf storageCfg.encryption.enable {
-      path = [
-        pkgs.cryptsetup
+      # Add cryptsetup to path for LUKS cleanup
+      path = lib.mkForce [
         pkgs.lvm2
+        pkgs.cryptsetup
       ];
-      serviceConfig.ExecStop = lib.mkForce (pkgs.writeShellScript "devmapper-cleanup" ''
-        dmsetup remove containerd-pool || true
-        cryptsetup close containerd-data-crypt || true
-      '');
+      # Use mkForce on serviceConfig to properly override the base service's ExecStop
+      serviceConfig = lib.mkForce {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        # Use PATH-relative commands - packages are in service's path
+        ExecStop = pkgs.writeShellScript "devmapper-luks-cleanup" ''
+          dmsetup remove containerd-pool || true
+          cryptsetup close containerd-data-crypt || true
+        '';
+      };
     };
 
     # Secure snapshot cleanup service
