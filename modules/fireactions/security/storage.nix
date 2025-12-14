@@ -121,7 +121,13 @@ in
         # Need cryptsetup for LUKS operations
         ExecSearchPath = [ "${pkgs.cryptsetup}/bin" ];
       };
-      path = [ pkgs.cryptsetup ];
+      # All packages used in the script must be in path to ensure closure includes them
+      path = [
+        pkgs.cryptsetup
+        pkgs.lvm2
+        pkgs.util-linux
+        pkgs.coreutils
+      ];
 
       # Override the script to add LUKS layer
       script = lib.mkForce ''
@@ -158,13 +164,12 @@ in
           echo "Generated ephemeral encryption key"
         fi
 
-        # Check if LUKS is already set up on data file
+        # Setup loop device for data file
         DATA_LOOP=$(${pkgs.util-linux}/bin/losetup --find --show "$DATA_FILE")
 
-        if ! ${pkgs.cryptsetup}/bin/cryptsetup isLuks "$DATA_LOOP" 2>/dev/null; then
+        # Function to format LUKS
+        format_luks() {
           echo "Initializing LUKS encryption on data file..."
-
-          # Format with LUKS
           ${pkgs.cryptsetup}/bin/cryptsetup luksFormat \
             --batch-mode \
             --type luks2 \
@@ -176,12 +181,36 @@ in
             --pbkdf-parallel 4 \
             "$DATA_LOOP" \
             "$KEY_FILE"
-
           echo "LUKS encryption initialized"
-        fi
+        }
 
-        # Open LUKS container
-        if ! ${pkgs.lvm2}/bin/dmsetup status "$LUKS_NAME" &>/dev/null; then
+        # Check if LUKS is already set up on data file
+        if ${pkgs.cryptsetup}/bin/cryptsetup isLuks "$DATA_LOOP" 2>/dev/null; then
+          echo "LUKS header found, attempting to open with current key..."
+          # Try to open with current ephemeral key
+          if ! ${pkgs.cryptsetup}/bin/cryptsetup open \
+               --type luks2 \
+               "$DATA_LOOP" \
+               "$LUKS_NAME" \
+               --key-file "$KEY_FILE" 2>/dev/null; then
+            echo "Failed to open LUKS - key mismatch (stale ephemeral key from previous boot)"
+            echo "Wiping and re-creating LUKS container with new ephemeral key..."
+            # Detach loop, wipe data file, reattach
+            ${pkgs.util-linux}/bin/losetup -d "$DATA_LOOP"
+            ${pkgs.coreutils}/bin/truncate -s 0 "$DATA_FILE"
+            ${pkgs.coreutils}/bin/truncate -s 20G "$DATA_FILE"
+            DATA_LOOP=$(${pkgs.util-linux}/bin/losetup --find --show "$DATA_FILE")
+            format_luks
+            ${pkgs.cryptsetup}/bin/cryptsetup open \
+              --type luks2 \
+              "$DATA_LOOP" \
+              "$LUKS_NAME" \
+              --key-file "$KEY_FILE"
+          fi
+          echo "LUKS container opened"
+        else
+          # No LUKS header - fresh format
+          format_luks
           ${pkgs.cryptsetup}/bin/cryptsetup open \
             --type luks2 \
             "$DATA_LOOP" \
