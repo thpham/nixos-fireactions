@@ -567,6 +567,37 @@ in
     # Network Configuration
     #
 
+    # Create the bridge interface via systemd-networkd
+    # This ensures the bridge exists before dnsmasq starts (CNI would only create it when containers run)
+    systemd.network = {
+      enable = true;
+      netdevs."10-${cfg.networking.bridgeName}" = {
+        netdevConfig = {
+          Name = cfg.networking.bridgeName;
+          Kind = "bridge";
+        };
+      };
+      networks."10-${cfg.networking.bridgeName}" = {
+        matchConfig.Name = cfg.networking.bridgeName;
+        networkConfig = {
+          ConfigureWithoutCarrier = true;
+        };
+        # Assign gateway IP to the bridge (first IP in subnet)
+        # CNI expects the bridge to have the gateway IP for routing
+        address = [
+          (let
+            # Parse subnet like "10.200.0.0/24" to get gateway "10.200.0.1/24"
+            parts = lib.splitString "/" cfg.networking.subnet;
+            network = lib.head parts;
+            prefix = lib.last parts;
+            octets = lib.splitString "." network;
+            gateway = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}.1/${prefix}";
+          in gateway)
+        ];
+        linkConfig.RequiredForOnline = "no";
+      };
+    };
+
     # Firewall rules for microVM networking (optional, can be disabled)
     networking.firewall = {
       allowedTCPPorts = lib.mkIf cfg.metricsEnable [

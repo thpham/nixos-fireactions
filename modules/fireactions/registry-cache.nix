@@ -514,6 +514,12 @@ in
       };
     };
 
+    # Ensure dnsmasq waits for the bridge interface to be created by systemd-networkd
+    systemd.services.dnsmasq = {
+      after = [ "sys-subsystem-net-devices-${fireactionsCfg.networking.bridgeName}.device" ];
+      wants = [ "sys-subsystem-net-devices-${fireactionsCfg.networking.bridgeName}.device" ];
+    };
+
     # ========================================
     # DIRECTORY SETUP
     # ========================================
