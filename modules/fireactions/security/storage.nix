@@ -130,6 +130,8 @@ in
       ];
 
       # Override the script to add LUKS layer
+      # NOTE: Uses PATH-relative commands (not ${pkgs.*}/bin/) to avoid store path mismatches
+      # when building on target with different nixpkgs. The required packages are in the service's path.
       script = lib.mkForce ''
         set -euo pipefail
 
@@ -140,7 +142,7 @@ in
         KEY_FILE="/run/fireactions/secrets/storage.key"
 
         # Skip if pool already exists
-        if ${pkgs.lvm2}/bin/dmsetup status containerd-pool &>/dev/null; then
+        if dmsetup status containerd-pool &>/dev/null; then
           echo "containerd-pool already exists"
           exit 0
         fi
@@ -149,10 +151,10 @@ in
 
         # Create sparse files if they don't exist
         if [ ! -f "$DATA_FILE" ]; then
-          ${pkgs.coreutils}/bin/truncate -s 20G "$DATA_FILE"
+          truncate -s 20G "$DATA_FILE"
         fi
         if [ ! -f "$META_FILE" ]; then
-          ${pkgs.coreutils}/bin/truncate -s 200M "$META_FILE"
+          truncate -s 200M "$META_FILE"
         fi
 
         # Generate ephemeral encryption key (new key each boot)
@@ -165,12 +167,12 @@ in
         fi
 
         # Setup loop device for data file
-        DATA_LOOP=$(${pkgs.util-linux}/bin/losetup --find --show "$DATA_FILE")
+        DATA_LOOP=$(losetup --find --show "$DATA_FILE")
 
         # Function to format LUKS
         format_luks() {
           echo "Initializing LUKS encryption on data file..."
-          ${pkgs.cryptsetup}/bin/cryptsetup luksFormat \
+          cryptsetup luksFormat \
             --batch-mode \
             --type luks2 \
             --cipher aes-xts-plain64 \
@@ -185,10 +187,10 @@ in
         }
 
         # Check if LUKS is already set up on data file
-        if ${pkgs.cryptsetup}/bin/cryptsetup isLuks "$DATA_LOOP" 2>/dev/null; then
+        if cryptsetup isLuks "$DATA_LOOP" 2>/dev/null; then
           echo "LUKS header found, attempting to open with current key..."
           # Try to open with current ephemeral key
-          if ! ${pkgs.cryptsetup}/bin/cryptsetup open \
+          if ! cryptsetup open \
                --type luks2 \
                "$DATA_LOOP" \
                "$LUKS_NAME" \
@@ -196,12 +198,12 @@ in
             echo "Failed to open LUKS - key mismatch (stale ephemeral key from previous boot)"
             echo "Wiping and re-creating LUKS container with new ephemeral key..."
             # Detach loop, wipe data file, reattach
-            ${pkgs.util-linux}/bin/losetup -d "$DATA_LOOP"
-            ${pkgs.coreutils}/bin/truncate -s 0 "$DATA_FILE"
-            ${pkgs.coreutils}/bin/truncate -s 20G "$DATA_FILE"
-            DATA_LOOP=$(${pkgs.util-linux}/bin/losetup --find --show "$DATA_FILE")
+            losetup -d "$DATA_LOOP"
+            truncate -s 0 "$DATA_FILE"
+            truncate -s 20G "$DATA_FILE"
+            DATA_LOOP=$(losetup --find --show "$DATA_FILE")
             format_luks
-            ${pkgs.cryptsetup}/bin/cryptsetup open \
+            cryptsetup open \
               --type luks2 \
               "$DATA_LOOP" \
               "$LUKS_NAME" \
@@ -211,7 +213,7 @@ in
         else
           # No LUKS header - fresh format
           format_luks
-          ${pkgs.cryptsetup}/bin/cryptsetup open \
+          cryptsetup open \
             --type luks2 \
             "$DATA_LOOP" \
             "$LUKS_NAME" \
@@ -220,14 +222,13 @@ in
         fi
 
         # Setup metadata loop device
-        META_LOOP=$(${pkgs.util-linux}/bin/losetup --find --show "$META_FILE")
+        META_LOOP=$(losetup --find --show "$META_FILE")
 
         # Get sizes in 512-byte sectors
-        DATA_SIZE=$(${pkgs.util-linux}/bin/blockdev --getsize "/dev/mapper/$LUKS_NAME")
-        # META_SIZE=$(${pkgs.util-linux}/bin/blockdev --getsize "$META_LOOP")
+        DATA_SIZE=$(blockdev --getsize "/dev/mapper/$LUKS_NAME")
 
         # Create thin-pool with LUKS-encrypted data device
-        ${pkgs.lvm2}/bin/dmsetup create containerd-pool \
+        dmsetup create containerd-pool \
           --table "0 $DATA_SIZE thin-pool $META_LOOP /dev/mapper/$LUKS_NAME 128 32768 1 skip_block_zeroing"
 
         echo "containerd-pool created with LUKS encryption"
@@ -235,15 +236,16 @@ in
     };
 
     # Enhanced cleanup with LUKS close
+    # NOTE: Uses PATH-relative commands to avoid store path mismatches
     systemd.services.containerd-devmapper-cleanup = lib.mkIf storageCfg.encryption.enable {
       path = [
         pkgs.cryptsetup
         pkgs.lvm2
       ];
-      serviceConfig.ExecStop = lib.mkForce ''
-        ${pkgs.lvm2}/bin/dmsetup remove containerd-pool || true
-        ${pkgs.cryptsetup}/bin/cryptsetup close containerd-data-crypt || true
-      '';
+      serviceConfig.ExecStop = lib.mkForce (pkgs.writeShellScript "devmapper-cleanup" ''
+        dmsetup remove containerd-pool || true
+        cryptsetup close containerd-data-crypt || true
+      '');
     };
 
     # Secure snapshot cleanup service

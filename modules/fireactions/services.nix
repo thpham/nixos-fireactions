@@ -274,10 +274,14 @@ in
       description = "Cleanup devmapper thin-pool for containerd";
       wantedBy = [ "multi-user.target" ];
       after = [ "containerd.service" ];
+      path = [ pkgs.lvm2 ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStop = "${pkgs.lvm2}/bin/dmsetup remove containerd-pool || true";
+        # Use PATH-relative command to avoid store path mismatches when building on target
+        ExecStop = pkgs.writeShellScript "devmapper-cleanup" ''
+          dmsetup remove containerd-pool || true
+        '';
       };
       script = "true"; # No-op on start
     };
