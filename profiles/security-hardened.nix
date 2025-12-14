@@ -57,9 +57,11 @@
     };
 
     # Jailer integration (high risk, disabled by default)
-    # Enable after testing in your environment:
+    # WARNING: Jailer has known issues that can cause fast-fail loops,
+    # registering hundreds of orphaned runners with GitHub.
+    # Enable only after thorough testing in a non-production environment:
     jailer = {
-      enable = false;
+      enable = true;
       # uidRangeStart = 100000;
       # uidRangeEnd = 165535;
       # chrootBaseDir = "/srv/jailer";
