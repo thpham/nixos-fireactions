@@ -203,10 +203,12 @@ in
         );
 
     # Add required tools to containerd's PATH for devmapper snapshotter
+    # - util-linux: blkdiscard for TRIM/discard (required by containerd plugins)
     # - lvm2: dmsetup for device mapper operations
     # - thin-provisioning-tools: thin_check, thin_repair for thin pools
     # - e2fsprogs: mkfs.ext4 for formatting snapshot volumes
     systemd.services.containerd.path = [
+      pkgs.util-linux
       pkgs.lvm2
       pkgs.thin-provisioning-tools
       pkgs.e2fsprogs
