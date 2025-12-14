@@ -197,6 +197,19 @@ in
                --key-file "$KEY_FILE" 2>/dev/null; then
             echo "Failed to open LUKS - key mismatch (stale ephemeral key from previous boot)"
             echo "Wiping and re-creating LUKS container with new ephemeral key..."
+
+            # Clear containerd's state since we're wiping the pool
+            # This forces containerd to re-pull images on next start
+            echo "Clearing containerd state (snapshots lost due to LUKS wipe)..."
+            # Clear devmapper plugin's metadata databases (not the sparse data/metadata files)
+            rm -f /var/lib/containerd/devmapper/*.db || true
+            # Clear containerd's main metadata (image references, snapshots)
+            rm -rf /var/lib/containerd/io.containerd.metadata.v1.bolt || true
+
+            # Also wipe the thin-pool metadata file (it references old data)
+            truncate -s 0 "$META_FILE"
+            truncate -s 200M "$META_FILE"
+
             # Detach loop, wipe data file, reattach
             losetup -d "$DATA_LOOP"
             truncate -s 0 "$DATA_FILE"
