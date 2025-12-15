@@ -79,19 +79,38 @@
           overlays = [ microvm.overlay ];
         };
 
+        # Custom packages overlay module for nixos-generators
+        overlayModule = {
+          nixpkgs.overlays = [
+            (final: _prev: {
+              fireactions = final.callPackage ./pkgs/fireactions.nix { };
+              firecracker-kernel = final.callPackage ./pkgs/firecracker-kernel.nix { };
+              firecracker-kernel-custom = final.callPackage ./pkgs/firecracker-kernel-custom.nix { };
+              tc-redirect-tap = final.callPackage ./pkgs/tc-redirect-tap.nix { };
+              zot = final.callPackage ./pkgs/zot.nix { };
+            })
+          ];
+        };
+
         # Helper to build NixOS images using nixos-generators
         # Uses system argument to let nixos-generators handle pkgs correctly
         mkImages = targetSys: {
           qcow2 = nixos-generators.nixosGenerate {
             system = targetSys;
             format = "qcow";
-            modules = [ ./images/qcow2.nix ];
+            modules = [
+              overlayModule
+              ./images/qcow2.nix
+            ];
           };
 
           azure = nixos-generators.nixosGenerate {
             system = targetSys;
             format = "azure";
-            modules = [ ./images/azure.nix ];
+            modules = [
+              overlayModule
+              ./images/azure.nix
+            ];
           };
         };
 

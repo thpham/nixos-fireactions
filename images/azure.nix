@@ -1,139 +1,108 @@
-# Azure VHD image with cloud-init
-# Produces a VHD image compatible with Azure
+# Azure VHD image for VMSS deployment with Firecracker support
+#
+# This image is designed for Azure Virtual Machine Scale Sets (VMSS):
+# - Imports common fireactions configuration
+# - Cloud-init configured for Azure IMDS datasource
+# - Supports separate data disk for containerd storage
+#
+# Build: nix build .#image-azure
+# Upload to Azure: az image create --source result/nixos.vhd ...
+#
+# Example user-data for VMSS (use base64 for binary/multiline content):
+#   #cloud-config
+#   write_files:
+#     - path: /etc/fireactions/github-app-id
+#       content: "123456"
+#       permissions: "0600"
+#     - path: /etc/fireactions/github-private-key.pem
+#       encoding: b64
+#       content: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo... # base64 -w0 < key.pem
+#       permissions: "0600"
+#     - path: /etc/fireactions/pools.json
+#       encoding: b64
+#       content: W3sibmFtZSI6ICJkZWZhdWx0IiwgIm1heFJ1bm5lcnMi... # base64 -w0 < pools.json
+#       permissions: "0644"
+#   runcmd:
+#     - /etc/fireactions/bootstrap.sh
 {
-  pkgs,
+  lib,
   modulesPath,
   ...
 }:
 
 {
   imports = [
+    # Azure platform modules
     "${modulesPath}/virtualisation/azure-common.nix"
+    "${modulesPath}/virtualisation/azure-image.nix"
+    # Common fireactions configuration
+    ./common.nix
   ];
 
-  # Boot configuration
-  boot.kernelPackages = pkgs.linuxPackages_6_12;
+  #
+  # Azure-specific Boot Configuration
+  #
+
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
 
-  # Ensure KVM modules are available
-  boot.kernelModules = [
-    "kvm-intel"
-    "kvm-amd"
-  ];
+  #
+  # Azure-specific Cloud-init Configuration
+  #
 
-  # Azure-specific settings are provided by azure-common.nix
+  services.cloud-init.settings = {
+    # Azure IMDS as primary datasource
+    datasource_list = [
+      "Azure"
+      "None"
+    ];
 
-  # Cloud-init for configuration injection
-  services.cloud-init = {
-    enable = true;
-    network.enable = true;
-    settings = {
-      cloud_init_modules = [
-        "migrator"
-        "seed_random"
-        "bootcmd"
-        "write-files"
-        "growpart"
-        "resizefs"
-        "disk_setup"
-        "mounts"
-        "set_hostname"
-        "update_hostname"
-        "update_etc_hosts"
-        "ca-certs"
-        "users-groups"
-        "ssh"
-      ];
-      cloud_config_modules = [
-        "emit_upstart"
-        "ssh-import-id"
-        "locale"
-        "set-passwords"
-        "ntp"
-        "timezone"
-        "runcmd"
-      ];
-      cloud_final_modules = [
-        "package-update-upgrade-install"
-        "scripts-vendor"
-        "scripts-per-once"
-        "scripts-per-boot"
-        "scripts-per-instance"
-        "scripts-user"
-        "ssh-authkey-fingerprints"
-        "keys-to-console"
-        "final-message"
-      ];
+    datasource.Azure = {
+      apply_network_config = true;
+      data_dir = "/var/lib/waagent";
+      disk_aliases = {
+        ephemeral0 = "/dev/disk/cloud/azure_resource";
+      };
     };
-  };
 
-  # Networking
-  networking = {
-    hostName = "fireactions-node";
-    useDHCP = true;
-    firewall = {
-      enable = true;
-      allowedTCPPorts = [ 22 ];
+    # Disk setup for data disk (Azure attaches as /dev/disk/azure/scsi1/lun0)
+    # This provides extra storage for containerd images
+    disk_setup = {
+      "/dev/disk/azure/scsi1/lun0" = {
+        table_type = "gpt";
+        layout = true;
+        overwrite = false;
+      };
     };
+
+    fs_setup = [
+      {
+        label = "containerd-data";
+        filesystem = "ext4";
+        device = "/dev/disk/azure/scsi1/lun0-part1";
+        partition = "auto";
+        overwrite = false;
+      }
+    ];
+
+    mounts = [
+      [
+        "/dev/disk/azure/scsi1/lun0-part1"
+        "/var/lib/containerd"
+        "ext4"
+        "defaults,nofail,discard"
+        "0"
+        "2"
+      ]
+    ];
   };
 
-  # SSH configuration
-  services.openssh = {
-    enable = true;
-    settings = {
-      PasswordAuthentication = false;
-      PermitRootLogin = "prohibit-password";
-    };
+  #
+  # Azure-specific Fireactions Overrides
+  #
+
+  services.fireactions = {
+    # Larger cache for Azure VMs (typically have more memory)
+    registryCache.squid.memoryCache = lib.mkForce "512MB";
   };
-
-  # System packages
-  environment.systemPackages = with pkgs; [
-    vim
-    git
-    curl
-    wget
-    htop
-    tmux
-  ];
-
-  # Fireactions preparation script (run via cloud-init runcmd)
-  environment.etc."fireactions-setup.sh" = {
-    mode = "0755";
-    text = ''
-      #!/usr/bin/env bash
-      # Fireactions setup script
-      # This is called by cloud-init to configure fireactions
-
-      # Read configuration from cloud-init metadata
-      # Expected user-data format:
-      # #cloud-config
-      # write_files:
-      #   - path: /etc/fireactions/config.yaml
-      #     content: |
-      #       <your fireactions config>
-      # runcmd:
-      #   - /etc/fireactions-setup.sh
-
-      echo "Fireactions node ready for configuration"
-      echo "Add your fireactions flake and configuration to complete setup"
-    '';
-  };
-
-  # Disk configuration for Azure
-  fileSystems."/" = {
-    device = "/dev/disk/by-label/nixos";
-    fsType = "ext4";
-    autoResize = true;
-  };
-
-  fileSystems."/boot" = {
-    device = "/dev/disk/by-label/ESP";
-    fsType = "vfat";
-  };
-
-  # Grow partition on first boot
-  boot.growPartition = true;
-
-  system.stateVersion = "25.11";
 }

@@ -1,18 +1,39 @@
-# Generic QCOW2 cloud image
+# Generic QCOW2 cloud image for QEMU/KVM platforms
+#
 # Works with any QEMU/KVM-based platform (libvirt, Proxmox, OpenStack, etc.)
-{
-  pkgs,
-  modulesPath,
-  ...
-}:
+#
+# Build: nix build .#image-qcow2
+#
+# Example user-data (NoCloud):
+#   #cloud-config
+#   write_files:
+#     - path: /etc/fireactions/github-app-id
+#       content: "123456"
+#       permissions: "0600"
+#     - path: /etc/fireactions/github-private-key.pem
+#       encoding: b64
+#       content: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo... # base64 -w0 < key.pem
+#       permissions: "0600"
+#     - path: /etc/fireactions/pools.json
+#       encoding: b64
+#       content: W3sibmFtZSI6ICJkZWZhdWx0IiwgIm1heFJ1bm5lcnMi... # base64 -w0 < pools.json
+#       permissions: "0644"
+#   runcmd:
+#     - /etc/fireactions/bootstrap.sh
+{ modulesPath, ... }:
 
 {
   imports = [
+    # QEMU/KVM platform module
     "${modulesPath}/profiles/qemu-guest.nix"
+    # Common fireactions configuration
+    ./common.nix
   ];
 
-  # Boot configuration
-  boot.kernelPackages = pkgs.linuxPackages_6_12;
+  #
+  # QEMU-specific Boot Configuration
+  #
+
   boot.loader.grub = {
     enable = true;
     device = "nodev";
@@ -20,122 +41,35 @@
     efiInstallAsRemovable = true;
   };
 
-  # Ensure KVM modules are available
+  # KVM modules for nested virtualization (if needed)
   boot.kernelModules = [
     "kvm-intel"
     "kvm-amd"
   ];
 
-  # QEMU guest agent
+  #
+  # QEMU Guest Agent
+  #
+
   services.qemuGuest.enable = true;
 
-  # Cloud-init for configuration injection
-  services.cloud-init = {
-    enable = true;
-    network.enable = true;
-    settings = {
-      cloud_init_modules = [
-        "migrator"
-        "seed_random"
-        "bootcmd"
-        "write-files"
-        "growpart"
-        "resizefs"
-        "disk_setup"
-        "mounts"
-        "set_hostname"
-        "update_hostname"
-        "update_etc_hosts"
-        "ca-certs"
-        "users-groups"
-        "ssh"
-      ];
-      cloud_config_modules = [
-        "emit_upstart"
-        "ssh-import-id"
-        "locale"
-        "set-passwords"
-        "ntp"
-        "timezone"
-        "runcmd"
-      ];
-      cloud_final_modules = [
-        "package-update-upgrade-install"
-        "scripts-vendor"
-        "scripts-per-once"
-        "scripts-per-boot"
-        "scripts-per-instance"
-        "scripts-user"
-        "ssh-authkey-fingerprints"
-        "keys-to-console"
-        "final-message"
-      ];
-      datasource_list = [
-        "ConfigDrive"
-        "DigitalOcean"
-        "NoCloud"
-        "None"
-      ];
-    };
+  #
+  # QEMU-specific Cloud-init Configuration
+  #
+
+  services.cloud-init.settings = {
+    # Multiple datasources for flexibility across platforms
+    datasource_list = [
+      "ConfigDrive"
+      "NoCloud"
+      "None"
+    ];
   };
 
-  # Networking
-  networking = {
-    hostName = "fireactions-node";
-    useDHCP = true;
-    useNetworkd = true;
-    firewall = {
-      enable = true;
-      allowedTCPPorts = [ 22 ];
-    };
-  };
+  #
+  # QEMU-specific Networking
+  #
 
-  # SSH configuration
-  services.openssh = {
-    enable = true;
-    settings = {
-      PasswordAuthentication = false;
-      PermitRootLogin = "prohibit-password";
-    };
-  };
-
-  # System packages
-  environment.systemPackages = with pkgs; [
-    vim
-    git
-    curl
-    wget
-    htop
-    tmux
-  ];
-
-  # Fireactions preparation script
-  environment.etc."fireactions-setup.sh" = {
-    mode = "0755";
-    text = ''
-      #!/usr/bin/env bash
-      # Fireactions setup script for generic cloud
-      # Configure via cloud-init user-data
-
-      echo "Fireactions node ready for configuration"
-      echo "Add your fireactions flake and configuration to complete setup"
-    '';
-  };
-
-  # Disk configuration
-  fileSystems."/" = {
-    device = "/dev/disk/by-label/nixos";
-    fsType = "ext4";
-    autoResize = true;
-  };
-
-  fileSystems."/boot" = {
-    device = "/dev/disk/by-label/ESP";
-    fsType = "vfat";
-  };
-
-  # Grow partition on first boot
-  boot.growPartition = true;
-
-  system.stateVersion = "25.11";
+  # Use systemd-networkd for consistent network management
+  networking.useNetworkd = true;
 }
