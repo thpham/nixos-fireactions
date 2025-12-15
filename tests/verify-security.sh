@@ -8,7 +8,6 @@
 # - Kernel hardening (sysctls)
 # - Network isolation (VM-to-VM blocking, metadata blocking)
 # - Storage security (encryption, secure deletion)
-# - Jailer integration (process isolation)
 
 set -euo pipefail
 
@@ -169,36 +168,6 @@ test_nftables_rules() {
   fi
 }
 
-test_jailer_status() {
-  log "\n=== Jailer Integration ==="
-
-  # Check if any firecracker processes are running under jailer
-  if pgrep -f "jailer.*firecracker" &>/dev/null; then
-    pass "Firecracker processes running under jailer"
-  else
-    # Check if firecracker is running at all
-    if pgrep firecracker &>/dev/null; then
-      warn "Firecracker running without jailer (jailer.enable = false)"
-    else
-      info "No Firecracker processes currently running"
-    fi
-  fi
-
-  # Check chroot directory
-  if [[ -d "/srv/jailer" ]]; then
-    pass "Jailer chroot base directory exists"
-  else
-    warn "Jailer chroot directory not found (/srv/jailer)"
-  fi
-
-  # Check UID pool state
-  if [[ -d "/var/lib/fireactions/jailer/uid-pool" ]]; then
-    pass "UID pool state directory exists"
-  else
-    warn "UID pool state directory not found"
-  fi
-}
-
 test_storage_security() {
   log "\n=== Storage Security ==="
 
@@ -297,7 +266,6 @@ main() {
   test_kernel_hardening
   test_smt_status
   test_nftables_rules
-  test_jailer_status
   test_storage_security
   test_systemd_hardening
   test_vm_isolation

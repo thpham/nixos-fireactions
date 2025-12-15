@@ -26,12 +26,27 @@ Or enable individual features:
     hardening.sysctls.enable = true;  # Kernel hardening
 
     # Optional: Maximum security
-    jailer.enable = true;       # Process isolation
     storage.encryption.enable = true;
     hardening.disableHyperthreading = true;
   };
 }
 ```
+
+## Security Model
+
+Firecracker provides strong VM-level isolation via KVM virtualization. This is the primary
+security boundary - each GitHub Actions job runs in its own isolated virtual machine with:
+
+- Separate kernel instance
+- Isolated memory space
+- No shared filesystem with host
+- Network namespace isolation (via CNI)
+
+This module adds defense-in-depth layers on top of Firecracker's VM isolation.
+
+> **Note:** The Firecracker jailer was considered but removed due to NixOS incompatibility.
+> NixOS binaries are dynamically linked and require `/nix/store` access, which conflicts
+> with the jailer's chroot model. The KVM-based VM isolation is sufficient for most use cases.
 
 ## Features
 
@@ -95,22 +110,6 @@ each boot and stored in tmpfs. This is ideal for Firecracker because:
 - No key management complexity
 - Fresh encryption key on each boot = defense in depth
 
-### 4. Jailer Integration (`jailer.nix`)
-
-Wraps Firecracker with the jailer for enhanced isolation:
-
-- **Unique UID/GID per VM**: Each microVM runs as a different user
-- **Chroot isolation**: VMs run in isolated filesystem
-- **Automatic cleanup**: Orphaned UIDs and chroot directories cleaned periodically
-
-**Options:**
-
-- `jailer.enable` (default: false - requires testing)
-- `jailer.uidRangeStart` (default: 100000)
-- `jailer.uidRangeEnd` (default: 165535)
-- `jailer.chrootBaseDir` (default: "/srv/jailer")
-- `jailer.cleanupInterval` (default: "5m")
-
 ## Verification
 
 Run the verification script after deployment:
@@ -143,8 +142,6 @@ services.fireactions.security = {
 
   hardening.disableHyperthreading = true;  # -50% vCPUs
 
-  jailer.enable = true;
-
   storage.encryption.enable = true;  # Already enabled in security-hardened profile
 };
 ```
@@ -160,25 +157,6 @@ nft list table inet fireactions_isolation
 ```
 
 Ensure established connections are allowed and the bridge interface is correct.
-
-### Jailer fails to start
-
-1. Check UID pool status:
-
-   ```bash
-   /var/lib/fireactions/jailer/uid-pool/allocations.json
-   ```
-
-2. Verify chroot directory permissions:
-
-   ```bash
-   ls -la /srv/jailer/firecracker/
-   ```
-
-3. Check logs:
-   ```bash
-   journalctl -u fireactions -f
-   ```
 
 ### Storage encryption
 
@@ -200,11 +178,7 @@ If the devmapper pool fails to initialize:
 ```
 fireactions daemon
     │
-    ├── [jailer wrapper] (if jailer.enable)
-    │       │
-    │       └── firecracker (chroot + unique UID)
-    │
-    └── firecracker (direct, if jailer disabled)
+    └── firecracker (KVM-isolated VM)
             │
             └── microVM
                     │
@@ -221,4 +195,3 @@ fireactions daemon
 | `hardening.nix` | Kernel sysctls and systemd hardening       |
 | `network.nix`   | nftables rules for VM isolation            |
 | `storage.nix`   | LUKS encryption and secure deletion        |
-| `jailer.nix`    | Jailer wrapper and UID pool management     |

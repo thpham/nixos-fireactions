@@ -3,13 +3,13 @@
 # Enables comprehensive security hardening:
 # - Kernel sysctls and systemd hardening
 # - Network isolation (VM-to-VM blocking, metadata protection)
-# - Storage security (secure deletion)
+# - Storage security (secure deletion, encryption)
 #
-# Jailer integration is disabled by default (requires additional testing).
-# Enable with: services.fireactions.security.jailer.enable = true
+# Note: Firecracker's KVM-based VM isolation is the primary security boundary.
+# The jailer was considered but removed due to NixOS incompatibility
+# (dynamic linking requires /nix/store access inside chroot).
 #
 # For maximum security, also consider:
-# - services.fireactions.security.storage.encryption.enable = true
 # - services.fireactions.security.hardening.disableHyperthreading = true
 
 { config, lib, ... }:
@@ -54,17 +54,6 @@
       # Uses ephemeral key (new random key each boot) - ideal since Firecracker
       # VMs and devmapper storage are ephemeral anyway
       encryption.enable = true;
-    };
-
-    # Jailer integration (high risk, disabled by default)
-    # WARNING: Jailer has known issues that can cause fast-fail loops,
-    # registering hundreds of orphaned runners with GitHub.
-    # Enable only after thorough testing in a non-production environment:
-    jailer = {
-      enable = true;
-      # uidRangeStart = 100000;
-      # uidRangeEnd = 165535;
-      # chrootBaseDir = "/srv/jailer";
     };
   };
 }
