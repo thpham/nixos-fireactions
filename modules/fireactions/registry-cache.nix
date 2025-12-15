@@ -199,14 +199,17 @@ let
         registries = lib.mapAttrsToList (name: mirror: {
           urls = [ mirror.url ];
           content = [
-            ({
-              prefix = mirror.prefix;
-            } // lib.optionalAttrs (name != "docker.io") {
-              # Only add destination prefix for non-Docker Hub registries
-              # Docker Hub images are stored at root (e.g., /library/alpine)
-              # so BuildKit can access them without path rewriting
-              destination = "/${name}";
-            })
+            (
+              {
+                prefix = mirror.prefix;
+              }
+              // lib.optionalAttrs (name != "docker.io") {
+                # Only add destination prefix for non-Docker Hub registries
+                # Docker Hub images are stored at root (e.g., /library/alpine)
+                # so BuildKit can access them without path rewriting
+                destination = "/${name}";
+              }
+            )
           ];
           onDemand = mirror.onDemand;
           tlsVerify = true;
@@ -443,7 +446,7 @@ in
       };
     };
 
-    # Internal options (used by fireactions-node.nix)
+    # Internal options (used by services.nix)
     _internal = {
       gateway = lib.mkOption {
         type = lib.types.str;
@@ -509,6 +512,12 @@ in
         ];
         dhcp-rapid-commit = true;
       };
+    };
+
+    # Ensure dnsmasq waits for the bridge interface to be created by systemd-networkd
+    systemd.services.dnsmasq = {
+      after = [ "sys-subsystem-net-devices-${fireactionsCfg.networking.bridgeName}.device" ];
+      wants = [ "sys-subsystem-net-devices-${fireactionsCfg.networking.bridgeName}.device" ];
     };
 
     # ========================================
@@ -701,9 +710,32 @@ in
     };
 
     # ========================================
-    # IPTABLES NAT RULES
+    # NAT RULES FOR SQUID TRANSPARENT PROXY
     # ========================================
-    networking.nat = lib.mkIf cfg.squid.enable {
+    # Use nftables when security module enables it, otherwise fallback to iptables
+    networking.nftables.tables.registry_cache_nat =
+      lib.mkIf (cfg.squid.enable && config.networking.nftables.enable)
+        {
+          family = "ip";
+          content = ''
+            chain prerouting {
+              type nat hook prerouting priority dstnat; policy accept;
+
+              # Redirect HTTP (80) to Squid intercept port (skip gateway traffic)
+              iifname "${fireactionsCfg.networking.bridgeName}" ip daddr != ${gateway} tcp dport 80 \
+                redirect to :3128
+
+              ${lib.optionalString (cfg.squid.sslBump.mode != "off") ''
+                # Redirect HTTPS (443) to Squid intercept port (for SSL bump)
+                iifname "${fireactionsCfg.networking.bridgeName}" ip daddr != ${gateway} tcp dport 443 \
+                  redirect to :3129
+              ''}
+            }
+          '';
+        };
+
+    # Fallback to iptables when nftables is not enabled
+    networking.nat = lib.mkIf (cfg.squid.enable && !config.networking.nftables.enable) {
       enable = true;
       internalInterfaces = [ fireactionsCfg.networking.bridgeName ];
       extraCommands = ''

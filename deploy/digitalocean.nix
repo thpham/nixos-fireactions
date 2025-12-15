@@ -7,6 +7,11 @@
     "${modulesPath}/virtualisation/digital-ocean-config.nix"
   ];
 
+  # Disable autoResize - it doesn't work with LVM root (disko creates /dev/pool/root)
+  # The growpart service tries to strip digits from /dev/dm-X → /dev/dm- (invalid)
+  # For LVM resize: pvresize + lvextend + resize2fs (done manually or via cloud-init)
+  fileSystems."/".autoResize = lib.mkForce false;
+
   # Do not use DHCP, as DigitalOcean provisions IPs using cloud-init
   networking.useDHCP = lib.mkForce false;
 
