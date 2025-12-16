@@ -52,7 +52,7 @@ let
 
         image = lib.mkOption {
           type = lib.types.str;
-          default = "ghcr.io/thpham/fireactions-images/ubuntu-24.04:latest";
+          default = "ghcr.io/thpham/fireactions-images/ubuntu-24.04-github:latest";
           description = "OCI image for the runner";
         };
 

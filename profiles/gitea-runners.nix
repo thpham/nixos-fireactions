@@ -39,7 +39,7 @@
     #   minRunners = 1;
     #   runner = {
     #     labels = [ "self-hosted" "fireteact" "linux" "x64" ];
-    #     image = "ghcr.io/thpham/fireteact-images/gitea-runner:latest";
+    #     image = "ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:latest";
     #   };
     #   firecracker = {
     #     memSizeMib = 2048;

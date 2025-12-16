@@ -104,7 +104,7 @@ pools:
     minRunners: 2
     runner:
       name: "fireteact-runner"
-      image: "ghcr.io/example/gitea-runner:latest"
+      image: "ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:latest"
       labels:
         - "self-hosted"
         - "linux"
@@ -203,7 +203,7 @@ Fireteact is designed for NixOS deployment via the `nixos-fireactions` flake:
       minRunners = 1;
       runner = {
         labels = [ "self-hosted" "linux" "x64" ];
-        image = "ghcr.io/example/gitea-runner:latest";
+        image = "ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:latest";
       };
       firecracker = {
         memSizeMib = 2048;

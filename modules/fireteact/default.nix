@@ -51,7 +51,7 @@ let
 
         image = lib.mkOption {
           type = lib.types.str;
-          default = "ghcr.io/thpham/fireteact-images/gitea-runner:latest";
+          default = "ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:latest";
           description = "OCI image for the runner (must include act_runner)";
         };
 
