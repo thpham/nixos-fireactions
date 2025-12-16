@@ -100,10 +100,11 @@
         crossImages = mkImages crossTargetSystem;
       in
       {
-        # Packages: All Linux-only (fireactions depends on Linux networking primitives)
+        # Packages: All Linux-only (fireactions/fireteact depend on Linux networking primitives)
         packages =
           lib.optionalAttrs isLinux {
             fireactions = pkgsWithOverlays.callPackage ./pkgs/fireactions.nix { };
+            fireteact = pkgsWithOverlays.callPackage ./pkgs/fireteact.nix { };
             firecracker-kernel = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel.nix { };
             firecracker-kernel-custom = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel-custom.nix { };
             tc-redirect-tap = pkgsWithOverlays.callPackage ./pkgs/tc-redirect-tap.nix { };
@@ -142,14 +143,15 @@
             ];
 
           shellHook = ''
-            echo "fireactions development shell (${system})"
+            echo "fireactions/fireteact development shell (${system})"
             echo ""
           ''
           + lib.optionalString isLinux ''
             echo "Package targets (native ${system}):"
-            echo "  nix build .#fireactions"
-            echo "  nix build .#firecracker-kernel         # Upstream minimal (no Docker bridge)"
-            echo "  nix build .#firecracker-kernel-custom  # Minimal + Docker bridge networking"
+            echo "  nix build .#fireactions               # GitHub Actions runner orchestrator"
+            echo "  nix build .#fireteact                 # Gitea Actions runner orchestrator"
+            echo "  nix build .#firecracker-kernel        # Upstream minimal (no Docker bridge)"
+            echo "  nix build .#firecracker-kernel-custom # Minimal + Docker bridge networking"
             echo "  nix build .#tc-redirect-tap"
             echo ""
           ''
@@ -177,9 +179,10 @@
       }
     )
     // {
-      # NixOS module (not system-specific)
+      # NixOS modules (not system-specific)
       nixosModules = {
         fireactions = import ./modules/fireactions;
+        fireteact = import ./modules/fireteact;
         # Backwards compatibility alias
         fireactions-node = self.nixosModules.fireactions;
         default = self.nixosModules.fireactions;
@@ -188,6 +191,7 @@
       # Overlay for use in other flakes
       overlays.default = final: prev: {
         fireactions = final.callPackage ./pkgs/fireactions.nix { };
+        fireteact = final.callPackage ./pkgs/fireteact.nix { };
         firecracker-kernel = final.callPackage ./pkgs/firecracker-kernel.nix { };
         firecracker-kernel-custom = final.callPackage ./pkgs/firecracker-kernel-custom.nix { };
         tc-redirect-tap = final.callPackage ./pkgs/tc-redirect-tap.nix { };

@@ -22,3 +22,9 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
+
+# Go binaries
+fireteact/fireteact
+
+# Test files
+fireteact/test-*.yaml
