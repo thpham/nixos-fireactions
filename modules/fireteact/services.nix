@@ -362,7 +362,7 @@ in
           Type = "simple";
           User = cfg.user;
           Group = cfg.group;
-          ExecStart = "${cfg.package}/bin/fireteact -config ${effectiveConfigPath}";
+          ExecStart = "${cfg.package}/bin/fireteact serve --config ${effectiveConfigPath}";
           Restart = "always";
           RestartSec = "10s";
 
