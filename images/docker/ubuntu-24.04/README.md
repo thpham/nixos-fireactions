@@ -66,11 +66,13 @@ Format: `{runner_version}-{increment}`
 Each target uses its runner binary version as the primary version component:
 
 **GitHub Runner** (actions/runner):
+
 - `2.322.0-1` - First release with runner 2.322.0
 - `2.322.0-2` - Second release (agent update, bug fix)
 - `2.323.0-1` - First release with runner 2.323.0
 
 **Gitea Runner** (act_runner):
+
 - `0.2.11-1` - First release with act_runner 0.2.11
 - `0.2.11-2` - Second release (agent update, bug fix)
 - `0.2.12-1` - First release with act_runner 0.2.12
@@ -105,11 +107,11 @@ Any changes to `images/docker/ubuntu-24.04/**` on the `main` branch will trigger
 
 ## Workflow Triggers
 
-| Trigger                            | Version Tag   | Latest Tag |
-| ---------------------------------- | ------------- | ---------- |
-| `workflow_dispatch`                | ✅ (input)    | ✅         |
-| `git tag ubuntu-24.04-{platform}/*`| ✅ (from tag) | ✅         |
-| Push to `main` (paths)             | ❌            | ✅         |
+| Trigger                             | Version Tag   | Latest Tag |
+| ----------------------------------- | ------------- | ---------- |
+| `workflow_dispatch`                 | ✅ (input)    | ✅         |
+| `git tag ubuntu-24.04-{platform}/*` | ✅ (from tag) | ✅         |
+| Push to `main` (paths)              | ❌            | ✅         |
 
 ## Updating Components
 
