@@ -34,6 +34,15 @@
       restartUnits = [ "fireteact-config.service" ];
     };
 
+    # Debug SSH key for VM access (optional but recommended)
+    "debug-ssh-key" = {
+      key = "debug_ssh_key";
+      mode = "0400";
+      owner = "root";
+      group = "root";
+      restartUnits = [ "fireteact-config.service" ];
+    };
+
     # Uncomment if using repo scope:
     # "gitea-runner-repo" = {
     #   key = "gitea_runner_repo";
@@ -71,6 +80,9 @@
       # Uncomment and enable the secret above if using repo scope
       # runnerRepoFile = config.sops.secrets."gitea-runner-repo".path;
     };
+
+    # Debug SSH key for VM access (allows SSH into running VMs for troubleshooting)
+    debug.sshKeyFile = config.sops.secrets."debug-ssh-key".path;
 
     # Example pool configuration (override per-host as needed)
     # pools = [{

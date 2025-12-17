@@ -177,7 +177,7 @@ in
       description = "Log level for fireteact";
     };
 
-    debug = lib.mkOption {
+    debugMode = lib.mkOption {
       type = lib.types.bool;
       default = false;
       description = "Enable debug mode";
@@ -194,6 +194,15 @@ in
       type = lib.types.str;
       default = "127.0.0.1:8083";
       description = "Address for the metrics endpoint (note: different port from fireactions)";
+    };
+
+    # Debug configuration (matches fireactions structure)
+    debug = {
+      sshKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "SSH public key file for VM debugging access";
+      };
     };
 
     # Gitea configuration

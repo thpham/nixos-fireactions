@@ -281,7 +281,8 @@ in
           cfg.gitea.apiTokenFile != null
           || cfg.gitea.instanceUrlFile != null
           || cfg.gitea.runnerOwnerFile != null
-          || cfg.gitea.runnerRepoFile != null;
+          || cfg.gitea.runnerRepoFile != null
+          || cfg.debug.sshKeyFile != null;
         needsConfigService = cfg.configFile == null && needsSecrets;
       in
       lib.mkIf needsConfigService {
@@ -329,6 +330,13 @@ in
             fi
           ''}
 
+          ${lib.optionalString (cfg.debug.sshKeyFile != null) ''
+            if [ ! -f "${cfg.debug.sshKeyFile}" ]; then
+              echo "ERROR: Debug SSH key file not found: ${cfg.debug.sshKeyFile}"
+              exit 1
+            fi
+          ''}
+
           # Inject secrets into config using Python for proper YAML handling
           export API_TOKEN_FILE="${
             lib.optionalString (cfg.gitea.apiTokenFile != null) cfg.gitea.apiTokenFile
@@ -341,6 +349,9 @@ in
           }"
           export RUNNER_REPO_FILE="${
             lib.optionalString (cfg.gitea.runnerRepoFile != null) cfg.gitea.runnerRepoFile
+          }"
+          export DEBUG_SSH_KEY_FILE="${
+            lib.optionalString (cfg.debug.sshKeyFile != null) cfg.debug.sshKeyFile
           }"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
@@ -363,6 +374,7 @@ in
             || cfg.gitea.instanceUrlFile != null
             || cfg.gitea.runnerOwnerFile != null
             || cfg.gitea.runnerRepoFile != null
+            || cfg.debug.sshKeyFile != null
           );
         # Use runtime config if secrets need injection, otherwise static config
         effectiveConfigPath =
@@ -460,14 +472,17 @@ in
       # Assign gateway IP to the bridge (first IP in subnet)
       # CNI expects the bridge to have the gateway IP for routing
       address = [
-        (let
-          # Parse subnet like "10.201.0.0/24" to get gateway "10.201.0.1/24"
-          parts = lib.splitString "/" cfg.networking.subnet;
-          network = lib.head parts;
-          prefix = lib.last parts;
-          octets = lib.splitString "." network;
-          gateway = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}.1/${prefix}";
-        in gateway)
+        (
+          let
+            # Parse subnet like "10.201.0.0/24" to get gateway "10.201.0.1/24"
+            parts = lib.splitString "/" cfg.networking.subnet;
+            network = lib.head parts;
+            prefix = lib.last parts;
+            octets = lib.splitString "." network;
+            gateway = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}.1/${prefix}";
+          in
+          gateway
+        )
       ];
       linkConfig.RequiredForOnline = "no";
     };
@@ -508,15 +523,18 @@ in
 
         # DNS settings (only set if not already configured by fireactions)
         no-resolv = lib.mkDefault true;
-        server = lib.mkDefault [ "8.8.8.8" "1.1.1.1" ];
+        server = lib.mkDefault [
+          "8.8.8.8"
+          "1.1.1.1"
+        ];
         cache-size = lib.mkDefault 1000;
         log-queries = lib.mkDefault false;
 
         # DHCP settings for fireteact subnet (merges with fireactions' dhcp-range)
         dhcp-range = lib.mkAfter [ "${dhcpStart},${dhcpEnd},${netmask},12h" ];
         dhcp-option = lib.mkAfter [
-          "3,${gateway}"  # Gateway for fireteact subnet
-          "6,${gateway}"  # DNS server for fireteact subnet
+          "3,${gateway}" # Gateway for fireteact subnet
+          "6,${gateway}" # DNS server for fireteact subnet
         ];
         dhcp-rapid-commit = lib.mkDefault true;
       };

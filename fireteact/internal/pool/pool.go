@@ -338,6 +338,32 @@ func (p *Pool) createRunnerVM(runnerID, runnerName string) {
 	//
 	// IMPORTANT: cloud-init EC2 datasource requires instance-id and local-hostname
 	// at /version/meta-data/ level for the datasource to be recognized as valid.
+	//
+	// Start with pool config metadata (may include user-data from inject-secrets.py)
+	// then overlay dynamic per-runner fields
+	metadata := make(map[string]interface{})
+
+	// Copy pool config metadata (includes user-data, instance-id template, etc.)
+	for k, v := range p.cfg.Firecracker.Metadata {
+		metadata[k] = v
+	}
+
+	// Override with per-runner dynamic values
+	// These must be unique per VM instance
+	metadata["instance-id"] = runnerID
+	metadata["local-hostname"] = runnerName
+
+	// fireteact metadata - read by fireteact runner agent inside VM
+	// These fields match runner/mmds.Metadata struct
+	metadata["fireteact"] = map[string]interface{}{
+		"gitea_instance_url": p.gitea.GetInstanceURL(),
+		"registration_token": registrationToken,
+		"runner_name":        runnerName,
+		"runner_labels":      runnerLabels,
+		"pool_name":          p.cfg.Name,
+		"runner_id":          runnerID,
+	}
+
 	vmConfig := firecracker.VMConfig{
 		ID:         runnerID,
 		Name:       runnerName,
@@ -348,22 +374,7 @@ func (p *Pool) createRunnerVM(runnerID, runnerName string) {
 		KernelArgs: p.cfg.Firecracker.KernelArgs,
 		Image:      p.cfg.Runner.Image,
 		Labels:     p.cfg.Runner.Labels,
-		Metadata: map[string]interface{}{
-			// Required EC2 metadata fields for cloud-init compatibility
-			// cloud-init checks /2009-04-04/meta-data/instance-id first
-			"instance-id":    runnerID,
-			"local-hostname": runnerName,
-			// fireteact metadata - read by fireteact runner agent inside VM
-			// These fields match runner/mmds.Metadata struct
-			"fireteact": map[string]interface{}{
-				"gitea_instance_url": p.gitea.GetInstanceURL(),
-				"registration_token": registrationToken,
-				"runner_name":        runnerName,
-				"runner_labels":      runnerLabels,
-				"pool_name":          p.cfg.Name,
-				"runner_id":          runnerID,
-			},
-		},
+		Metadata:   metadata,
 	}
 
 	// Create the VM
