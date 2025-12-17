@@ -2,8 +2,8 @@
 # Profiles are applied based on host tags from registry.json
 #
 # Usage:
-#   A host with tags ["prod", "runners"] will have both
-#   profiles/prod.nix and profiles/runners.nix applied
+#   A host with tags ["prod", "github-runners"] will have both
+#   profiles/prod.nix and profiles/github-runners.nix applied
 #
 # Profile priority (later overrides earlier):
 #   1. deploy/base.nix (boot, SSH, network - always applied)
@@ -19,7 +19,8 @@ let
     dev = ./dev.nix;
 
     # Workload profiles
-    runners = ./runners.nix;
+    github-runners = ./github-runners.nix;
+    gitea-runners = ./gitea-runners.nix;
 
     # Size profiles
     small = ./small.nix;

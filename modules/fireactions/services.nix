@@ -615,11 +615,12 @@ in
     # NAT configuration for microVM networking
     # CNI's ipMasq only creates NAT rules for CNI-assigned IPs, but our DHCP server
     # assigns different IPs. This adds subnet-wide masquerading for all VM traffic.
+    # Use mkDefault to allow provider-specific overrides and merge with fireteact
     networking.nat = {
-      enable = true;
+      enable = lib.mkDefault true;
       internalInterfaces = [ cfg.networking.bridgeName ];
       internalIPs = [ cfg.networking.subnet ];
-      externalInterface = cfg.networking.externalInterface;
+      externalInterface = lib.mkDefault cfg.networking.externalInterface;
     };
   };
 }

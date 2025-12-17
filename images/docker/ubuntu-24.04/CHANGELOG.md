@@ -1,26 +1,36 @@
 # Changelog
 
-All notable changes to the Ubuntu 24.04 base image will be documented in this file.
+All notable changes to the Ubuntu 24.04 runner images will be documented in this file.
 
-Versioning format: `{fireactions_version}-{image_increment}` (e.g., `0.4.0-0.1.0`)
+Versioning format: `{runner_version}-{increment}` (e.g., `2.322.0-1` for GitHub, `0.2.13-1` for Gitea)
 
-## [0.4.0-0.1.0](https://github.com/thpham/nixos-fireactions/releases/tag/ubuntu-24.04/0.4.0-0.1.0) (2025-12-08)
+## GitHub Runner
 
-### Features
+### [2.322.0-1] - Unreleased
 
-- Initial release of Ubuntu 24.04 base image
-- GitHub Actions runner v2.330.0
-- Fireactions v0.4.0
-- Docker CE with BuildKit and Compose plugin
-- GitHub CLI (gh)
-- Multiarch support (amd64/arm64)
+Initial release with new versioning scheme.
 
-### Components
+#### Components
 
 | Component             | Version   |
 | --------------------- | --------- |
 | Ubuntu                | 24.04 LTS |
-| GitHub Actions Runner | 2.330.0   |
-| Fireactions           | 0.4.0     |
+| GitHub Actions Runner | 2.322.0   |
+| fireactions           | 0.4.0     |
 | Docker CE             | latest    |
 | GitHub CLI            | latest    |
+
+## Gitea Runner
+
+### [0.2.13-1] - Unreleased
+
+Initial release with new versioning scheme.
+
+#### Components
+
+| Component  | Version   |
+| ---------- | --------- |
+| Ubuntu     | 24.04 LTS |
+| act_runner | 0.2.11    |
+| fireteact  | latest    |
+| Docker CE  | latest    |

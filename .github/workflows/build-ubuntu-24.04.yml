@@ -1,17 +1,27 @@
-name: Build Ubuntu 24.04 Base Image
+name: Build Runner Images
 
 on:
   schedule:
-    - cron: '0 3 * * 0'  # Weekly on Sunday at 3 AM UTC - cleanup orphaned images
+    - cron: "0 3 * * 0" # Weekly on Sunday at 3 AM UTC - cleanup orphaned images
   workflow_dispatch:
     inputs:
       version:
-        description: "Image version (e.g., 0.4.0-0.1.0)"
+        description: "Development version tag (must start with 'dev-', e.g., dev-test, dev-feature-x)"
         required: true
-        default: "0.4.0-0.1.0"
+        default: "dev-"
+      target:
+        description: "Build target"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - github-runner
+          - gitea-runner
+          - both
   push:
     tags:
-      - "ubuntu-24.04/*" # Matches: ubuntu-24.04/0.4.0-0.1.0
+      - "ubuntu-24.04-github/*" # Matches: ubuntu-24.04-github/2.322.0-1
+      - "ubuntu-24.04-gitea/*" # Matches: ubuntu-24.04-gitea/0.2.11-1
     branches:
       - main
     paths:
@@ -19,34 +29,63 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/fireactions-images/ubuntu-24.04
+  IMAGE_BASE: ${{ github.repository_owner }}/fireactions-images
 
 jobs:
-  # Extract version from trigger
+  # Determine what to build based on trigger
   prepare:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    if: github.event_name != 'schedule'
     outputs:
-      version: ${{ steps.meta.outputs.version }}
-      image_name: ${{ steps.meta.outputs.image_name }}
+      targets: ${{ steps.set-targets.outputs.targets }}
+      version: ${{ steps.set-targets.outputs.version }}
     steps:
-      - name: Determine version
-        id: meta
+      - name: Validate manual dispatch version
+        if: github.event_name == 'workflow_dispatch'
         run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          # Enforce 'dev-*' pattern for manual dispatch
+          if [[ ! "${VERSION}" =~ ^dev-.+ ]]; then
+            echo "::error::Manual dispatch versions must start with 'dev-' (e.g., dev-test, dev-feature-x). Release versions should use git tags."
+            exit 1
+          fi
+
+          echo "✅ Version '${VERSION}' is valid (dev build)"
+
+      - name: Determine build targets
+        id: set-targets
+        run: |
+          # Determine which targets to build
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             VERSION="${{ github.event.inputs.version }}"
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            # Extract from tag: ubuntu-24.04/0.4.0-0.1.0
+            TARGET="${{ github.event.inputs.target }}"
+          elif [[ "${{ github.ref }}" == refs/tags/ubuntu-24.04-github/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            VERSION="${TAG#*/}"
+            VERSION="${TAG#ubuntu-24.04-github/}"
+            TARGET="github-runner"
+          elif [[ "${{ github.ref }}" == refs/tags/ubuntu-24.04-gitea/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#ubuntu-24.04-gitea/}"
+            TARGET="gitea-runner"
           else
-            # Default for push to main (paths trigger)
+            # Push to main - build both with latest tag
             VERSION="latest"
+            TARGET="both"
           fi
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "image_name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_OUTPUT
 
-  # Build on native runners for each architecture
+          # Build JSON array of targets
+          if [[ "${TARGET}" == "both" ]]; then
+            TARGETS='["github-runner","gitea-runner"]'
+          else
+            TARGETS='["'"${TARGET}"'"]'
+          fi
+
+          echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building targets: ${TARGETS} with version: ${VERSION}"
+
+  # Build each target image on native runners for each architecture
   build:
     needs: prepare
     runs-on: ${{ matrix.runner }}
@@ -56,6 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        target: ${{ fromJson(needs.prepare.outputs.targets) }}
         include:
           - runner: ubuntu-latest
             platform: linux/amd64
@@ -64,6 +104,23 @@ jobs:
             platform: linux/arm64
             arch: arm64
     steps:
+      - name: Set variables
+        id: vars
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          # Map target to image name: github-runner -> ubuntu-24.04-github
+          if [[ "${TARGET}" == "github-runner" ]]; then
+            IMAGE_SUFFIX="ubuntu-24.04-github"
+          else
+            IMAGE_SUFFIX="ubuntu-24.04-gitea"
+          fi
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/${IMAGE_SUFFIX}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "image_suffix=${IMAGE_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "target=${TARGET}" >> $GITHUB_OUTPUT
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -82,15 +139,17 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: images/docker/ubuntu-24.04
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           push: true
-          outputs: type=image,name=${{ needs.prepare.outputs.image_name }},push-by-digest=true,name-canonical=true
-          cache-from: type=gha,scope=ubuntu-24.04-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=ubuntu-24.04-${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.vars.outputs.image_name }},push-by-digest=true,name-canonical=true
+          cache-from: type=gha,scope=${{ matrix.target }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+            org.opencontainers.image.title=${{ steps.vars.outputs.image_suffix }}
 
       - name: Export digest
         run: |
@@ -101,24 +160,44 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.arch }}
+          name: digests-${{ matrix.target }}-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  # Create multi-arch manifest
+  # Create multi-arch manifests for each target
   manifest:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        target: ${{ fromJson(needs.prepare.outputs.targets) }}
     steps:
+      - name: Set variables
+        id: vars
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          # Map target to image name: github-runner -> ubuntu-24.04-github
+          if [[ "${TARGET}" == "github-runner" ]]; then
+            IMAGE_SUFFIX="ubuntu-24.04-github"
+          else
+            IMAGE_SUFFIX="ubuntu-24.04-gitea"
+          fi
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/${IMAGE_SUFFIX}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "image_suffix=${IMAGE_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "target=${TARGET}" >> $GITHUB_OUTPUT
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.target }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -134,8 +213,8 @@ jobs:
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          IMAGE_NAME="${{ needs.prepare.outputs.image_name }}"
-          VERSION="${{ needs.prepare.outputs.version }}"
+          IMAGE_NAME="${{ steps.vars.outputs.image_name }}"
+          VERSION="${{ steps.vars.outputs.version }}"
 
           # Build tags array
           TAGS="-t ${IMAGE_NAME}:${VERSION}"
@@ -149,35 +228,39 @@ jobs:
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.version }}
+          docker buildx imagetools inspect ${{ steps.vars.outputs.image_name }}:${{ steps.vars.outputs.version }}
 
       - name: Summary
         run: |
-          echo "## Ubuntu 24.04 Base Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "## ${{ steps.vars.outputs.image_suffix }} Image Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** \`${{ needs.prepare.outputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.vars.outputs.image_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ needs.prepare.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ needs.prepare.outputs.version }}" != "latest" ]]; then
+          echo "- \`${{ steps.vars.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.vars.outputs.version }}" != "latest" ]]; then
             echo "- \`latest\`" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Architectures:** \`amd64\`, \`arm64\`" >> $GITHUB_STEP_SUMMARY
 
   # Cleanup orphaned images (runs weekly on schedule)
-  # Removes untagged manifests while preserving multi-arch platform images
   cleanup:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     permissions:
       packages: write
+    strategy:
+      matrix:
+        package:
+          - fireactions-images/ubuntu-24.04-github
+          - fireactions-images/ubuntu-24.04-gitea
     steps:
       - name: Delete orphaned images
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          package: fireactions-images/ubuntu-24.04
+          package: ${{ matrix.package }}
           delete-untagged: true
           delete-ghost-images: true
           delete-partial-images: true
@@ -188,4 +271,4 @@ jobs:
         run: |
           echo "## GHCR Cleanup Completed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Removed orphaned/untagged images from \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Removed orphaned/untagged images from \`${{ env.REGISTRY }}/${{ matrix.package }}\`" >> $GITHUB_STEP_SUMMARY

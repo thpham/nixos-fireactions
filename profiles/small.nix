@@ -4,6 +4,7 @@
 { lib, ... }:
 
 {
+  # GitHub Actions runners (fireactions)
   services.fireactions = {
     #kernelSource = "custom";
     pools = lib.mkDefault [
@@ -18,6 +19,31 @@
           labels = [
             "self-hosted"
             "fireactions"
+            "linux"
+            "small"
+          ];
+        };
+        firecracker = {
+          memSizeMib = 1024;
+          vcpuCount = 1;
+        };
+      }
+    ];
+  };
+
+  # Gitea Actions runners (fireteact)
+  services.fireteact = {
+    #kernelSource = "custom";
+    pools = lib.mkDefault [
+      {
+        name = "default";
+        maxRunners = 2;
+        minRunners = 1;
+        runner = {
+          imagePullPolicy = "Always";
+          labels = [
+            "self-hosted"
+            "fireteact"
             "linux"
             "small"
           ];

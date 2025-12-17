@@ -34,6 +34,7 @@ let
       { disko.devices.disk.disk1.device = "/dev/vda"; }
       # DigitalOcean uses ens3 as the external interface (not eth0)
       { services.fireactions.networking.externalInterface = "ens3"; }
+      { services.fireteact.networking.externalInterface = "ens3"; }
     ];
 
     # Hetzner Cloud/Dedicated
@@ -96,6 +97,7 @@ let
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
         self.nixosModules.fireactions
+        self.nixosModules.fireteact
 
         # Disk layout config (generates fileSystems/boot.loader from disko)
         # Actual partitioning only happens during nixos-anywhere initial deploy

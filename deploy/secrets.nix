@@ -63,6 +63,9 @@
         # Restart fireactions-config to regenerate cloud-init user-data
         restartUnits = [ "fireactions-config.service" ];
       };
+
+      # Gitea secrets for fireteact are defined in modules/fireteact/default.nix
+      # They are conditional based on which *File options are used
     };
   };
 }
