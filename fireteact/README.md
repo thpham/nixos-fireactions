@@ -92,8 +92,8 @@ server:
 gitea:
   instanceURL: "https://gitea.example.com"
   apiToken: "your-api-token" # Or use apiTokenFile
-  runnerScope: "org"         # Recommended: "org" (see Security section)
-  runnerOwner: "my-org"      # Required for org/repo scope
+  runnerScope: "org" # Recommended: "org" (see Security section)
+  runnerOwner: "my-org" # Required for org/repo scope
   # runnerRepo: "my-repo"    # Required for repo scope only
 
 logLevel: "info"
@@ -163,11 +163,13 @@ Fireteact supports three runner registration scopes with different security impl
 ⚠️ **Avoid `instance` scope in production** - An admin token on each orchestrator host means a compromise exposes your entire Gitea instance.
 
 **Recommended: Use `org` scope** (default)
+
 - Create a dedicated organization for CI/CD workloads
 - Generate a token with only `write:organization` scope
 - Runners only have access to that organization's repositories
 
 **Most secure: Use `repo` scope**
+
 - Each orchestrator manages runners for a single repository
 - Minimal blast radius if compromised
 - Best for high-security workloads

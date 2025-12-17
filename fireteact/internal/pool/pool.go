@@ -11,6 +11,7 @@ import (
 	"github.com/thpham/fireteact/internal/config"
 	"github.com/thpham/fireteact/internal/firecracker"
 	"github.com/thpham/fireteact/internal/gitea"
+	"github.com/thpham/fireteact/internal/stringid"
 )
 
 // RunnerState represents the current state of a runner VM.
@@ -46,18 +47,18 @@ type PoolStatus struct {
 
 // Pool manages a group of runner VMs for a specific configuration.
 type Pool struct {
-	cfg          *config.PoolConfig
-	globalCfg    *config.Config
-	gitea        *gitea.Client
-	vmManager    *firecracker.Manager
-	log          *logrus.Logger
-	runners      map[string]*RunnerInfo
-	mu           sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	scaleTicker  *time.Ticker
-	runnerSeq    int
+	cfg         *config.PoolConfig
+	globalCfg   *config.Config
+	gitea       *gitea.Client
+	vmManager   *firecracker.Manager
+	log         *logrus.Logger
+	runners     map[string]*RunnerInfo
+	mu          sync.RWMutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	scaleTicker *time.Ticker
+	isActive    bool
 }
 
 // New creates a new Pool instance.
@@ -67,14 +68,24 @@ func New(cfg *config.PoolConfig, giteaClient *gitea.Client, globalCfg *config.Co
 		return nil, fmt.Errorf("failed to create VM manager: %w", err)
 	}
 
-	return &Pool{
+	p := &Pool{
 		cfg:       cfg,
 		globalCfg: globalCfg,
 		gitea:     giteaClient,
 		vmManager: vmManager,
 		log:       log,
 		runners:   make(map[string]*RunnerInfo),
-	}, nil
+		isActive:  true,
+	}
+
+	// Initialize Prometheus metrics for this pool
+	metricPoolMaxRunnersCount.WithLabelValues(cfg.Name).Set(float64(cfg.MaxRunners))
+	metricPoolMinRunnersCount.WithLabelValues(cfg.Name).Set(float64(cfg.MinRunners))
+	metricPoolCurrentRunnersCount.WithLabelValues(cfg.Name).Set(0)
+	metricPoolStatus.WithLabelValues(cfg.Name).Set(1)
+	metricPoolTotal.Inc()
+
+	return p, nil
 }
 
 // Config returns the pool configuration.
@@ -143,7 +154,49 @@ func (p *Pool) Stop() error {
 		}
 	}
 
+	// Close the VM manager
+	if p.vmManager != nil {
+		if err := p.vmManager.Close(); err != nil {
+			p.log.Errorf("Failed to close VM manager: %v", err)
+		}
+	}
+
 	return nil
+}
+
+// Pause pauses the pool. Pausing prevents the pool from scaling.
+func (p *Pool) Pause() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.isActive {
+		return
+	}
+
+	p.log.Infof("Pool %s state changed to paused", p.cfg.Name)
+	p.isActive = false
+	metricPoolStatus.WithLabelValues(p.cfg.Name).Set(0)
+}
+
+// Resume resumes a paused pool. Resuming allows the pool to scale again.
+func (p *Pool) Resume() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.isActive {
+		return
+	}
+
+	p.log.Infof("Pool %s state changed to active", p.cfg.Name)
+	p.isActive = true
+	metricPoolStatus.WithLabelValues(p.cfg.Name).Set(1)
+}
+
+// IsActive returns whether the pool is active (not paused).
+func (p *Pool) IsActive() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.isActive
 }
 
 // scalingLoop periodically checks and adjusts the pool size.
@@ -165,13 +218,32 @@ func (p *Pool) checkAndScale() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Count current active runners
+	// Update current runner count metric
+	metricPoolCurrentRunnersCount.WithLabelValues(p.cfg.Name).Set(float64(len(p.runners)))
+
+	// Skip scaling if pool is paused
+	if !p.isActive {
+		p.log.Debugf("Pool %s is paused, skipping scaling", p.cfg.Name)
+		return
+	}
+
+	// Count current active runners and update metrics
 	activeCount := 0
+	idleCount := 0
+	busyCount := 0
 	for _, r := range p.runners {
 		if r.Status != RunnerStateStopped && r.Status != RunnerStateFailed {
 			activeCount++
 		}
+		if r.Status == RunnerStateIdle {
+			idleCount++
+		}
+		if r.Status == RunnerStateBusy {
+			busyCount++
+		}
 	}
+	metricPoolIdleRunnersCount.WithLabelValues(p.cfg.Name).Set(float64(idleCount))
+	metricPoolBusyRunnersCount.WithLabelValues(p.cfg.Name).Set(float64(busyCount))
 
 	// Check queue depth for scaling decisions
 	queueDepth, err := p.gitea.GetQueueDepth(p.ctx, p.cfg.Runner.Labels)
@@ -187,7 +259,7 @@ func (p *Pool) checkAndScale() {
 		targetRunners = min(p.cfg.MinRunners+queueDepth, p.cfg.MaxRunners)
 	}
 
-	p.log.Debugf("Pool %s: active=%d, queue=%d, target=%d", p.cfg.Name, activeCount, queueDepth, targetRunners)
+	p.log.Debugf("Pool %s: active=%d, idle=%d, busy=%d, queue=%d, target=%d", p.cfg.Name, activeCount, idleCount, busyCount, queueDepth, targetRunners)
 
 	// Scale up if needed
 	for activeCount < targetRunners {
@@ -222,11 +294,13 @@ func (p *Pool) scaleToMinimum() error {
 
 // spawnRunnerLocked spawns a new runner VM. Caller must hold p.mu.
 func (p *Pool) spawnRunnerLocked() error {
-	p.runnerSeq++
-	runnerID := fmt.Sprintf("%s-%d", p.cfg.Name, p.runnerSeq)
-	runnerName := fmt.Sprintf("%s-%s-%d", p.cfg.Runner.Name, p.cfg.Name, p.runnerSeq)
+	// Generate unique ID using random hex string (collision-resistant across restarts)
+	uniqueID := stringid.New()
+	runnerID := fmt.Sprintf("%s-%s", p.cfg.Name, uniqueID)
+	runnerName := fmt.Sprintf("%s-%s", p.cfg.Runner.Name, uniqueID)
 
 	p.log.Infof("Spawning runner: %s", runnerID)
+	metricPoolScaleRequests.WithLabelValues(p.cfg.Name).Inc()
 
 	runner := &RunnerInfo{
 		ID:        runnerID,
@@ -244,35 +318,44 @@ func (p *Pool) spawnRunnerLocked() error {
 
 // createRunnerVM creates the actual VM for a runner.
 func (p *Pool) createRunnerVM(runnerID, runnerName string) {
+	startTime := time.Now()
+
 	// Get a fresh registration token for this specific runner
 	registrationToken, err := p.gitea.GetRegistrationToken(p.ctx)
 	if err != nil {
 		p.log.Errorf("Failed to get registration token for runner %s: %v", runnerID, err)
 		p.updateRunnerStatus(runnerID, RunnerStateFailed, "", "")
+		metricPoolScaleFailures.WithLabelValues(p.cfg.Name).Inc()
 		return
 	}
 
-	// Generate cloud-init user-data with the per-runner token
-	cloudInitUserData := p.gitea.GenerateCloudInitUserData(
-		registrationToken,
-		p.cfg.Runner.Labels,
-		p.cfg.Name,
-	)
+	// Build runner labels string (comma-separated)
+	runnerLabels := joinLabels(p.cfg.Runner.Labels)
 
 	// Prepare VM configuration with runner metadata
+	// The fireteact runner agent inside the VM reads this metadata from MMDS
+	// at /latest/meta-data/fireteact to register with Gitea and start act_runner
 	vmConfig := firecracker.VMConfig{
 		ID:         runnerID,
 		Name:       runnerName,
-		MemSizeMib: p.cfg.Firecracker.MemSizeMib,
-		VcpuCount:  p.cfg.Firecracker.VcpuCount,
+		PoolName:   p.cfg.Name,
+		MemSizeMib: int64(p.cfg.Firecracker.MemSizeMib),
+		VcpuCount:  int64(p.cfg.Firecracker.VcpuCount),
 		KernelPath: p.cfg.Firecracker.KernelPath,
 		KernelArgs: p.cfg.Firecracker.KernelArgs,
 		Image:      p.cfg.Runner.Image,
 		Labels:     p.cfg.Runner.Labels,
-		Metadata: map[string]string{
-			"runner_id":   runnerID,
-			"runner_name": runnerName,
-			"user-data":   cloudInitUserData,
+		Metadata: map[string]interface{}{
+			// fireteact metadata - read by fireteact runner agent inside VM
+			// These fields match runner/mmds.Metadata struct
+			"fireteact": map[string]interface{}{
+				"gitea_instance_url": p.gitea.GetInstanceURL(),
+				"registration_token": registrationToken,
+				"runner_name":        runnerName,
+				"runner_labels":      runnerLabels,
+				"pool_name":          p.cfg.Name,
+				"runner_id":          runnerID,
+			},
 		},
 	}
 
@@ -281,14 +364,19 @@ func (p *Pool) createRunnerVM(runnerID, runnerName string) {
 	if err != nil {
 		p.log.Errorf("Failed to create VM for runner %s: %v", runnerID, err)
 		p.updateRunnerStatus(runnerID, RunnerStateFailed, "", "")
+		metricPoolScaleFailures.WithLabelValues(p.cfg.Name).Inc()
 		return
 	}
+
+	// Record VM creation time
+	metricVMCreationDuration.WithLabelValues(p.cfg.Name).Observe(time.Since(startTime).Seconds())
+	metricPoolScaleSuccesses.WithLabelValues(p.cfg.Name).Inc()
 
 	p.log.Infof("Runner %s started with VM %s (IP: %s)", runnerID, vm.ID, vm.IPAddress)
 	p.updateRunnerStatus(runnerID, RunnerStateIdle, vm.ID, vm.IPAddress)
 
 	// Monitor VM lifecycle
-	go p.monitorRunner(runnerID, vm.ID)
+	go p.monitorRunner(runnerID, vm.ID, startTime)
 }
 
 // updateRunnerStatus updates the status of a runner.
@@ -308,7 +396,7 @@ func (p *Pool) updateRunnerStatus(runnerID string, status RunnerState, vmID, ipA
 }
 
 // monitorRunner watches a runner VM and cleans up when it exits.
-func (p *Pool) monitorRunner(runnerID, vmID string) {
+func (p *Pool) monitorRunner(runnerID, vmID string, startTime time.Time) {
 	// Wait for VM to exit (this is where the magic happens -
 	// act_runner in ephemeral mode will exit after completing a job)
 	err := p.vmManager.WaitForExit(p.ctx, vmID)
@@ -317,6 +405,9 @@ func (p *Pool) monitorRunner(runnerID, vmID string) {
 	} else {
 		p.log.Infof("Runner %s completed (VM exited)", runnerID)
 	}
+
+	// Record VM lifetime
+	metricVMLifetimeDuration.WithLabelValues(p.cfg.Name).Observe(time.Since(startTime).Seconds())
 
 	// Mark runner as stopped
 	p.updateRunnerStatus(runnerID, RunnerStateStopped, "", "")

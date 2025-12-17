@@ -55,11 +55,12 @@ type RunnerConfig struct {
 
 // FirecrackerConfig holds VM resource settings.
 type FirecrackerConfig struct {
-	MemSizeMib int               `yaml:"memSizeMib"`
-	VcpuCount  int               `yaml:"vcpuCount"`
-	KernelArgs string            `yaml:"kernelArgs"`
-	KernelPath string            `yaml:"kernelPath"`
-	Metadata   map[string]string `yaml:"metadata"`
+	BinaryPath string                 `yaml:"binaryPath"`
+	MemSizeMib int                    `yaml:"memSizeMib"`
+	VcpuCount  int                    `yaml:"vcpuCount"`
+	KernelArgs string                 `yaml:"kernelArgs"`
+	KernelPath string                 `yaml:"kernelPath"`
+	Metadata   map[string]interface{} `yaml:"metadata"`
 }
 
 // ContainerdConfig holds containerd connection settings.
