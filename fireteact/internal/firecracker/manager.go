@@ -296,12 +296,14 @@ func (m *Manager) CreateVM(ctx context.Context, vmCfg VMConfig) (*VM, error) {
 }
 
 // DestroyVM stops and cleans up a Firecracker VM.
+// This function is idempotent - calling it on an already-destroyed VM returns nil.
 func (m *Manager) DestroyVM(vmID string) error {
 	m.vmsMu.Lock()
 	vm, ok := m.vms[vmID]
 	if !ok {
 		m.vmsMu.Unlock()
-		return fmt.Errorf("VM %s not found", vmID)
+		// VM already destroyed or never existed - this is fine during shutdown
+		return nil
 	}
 	delete(m.vms, vmID)
 	m.vmsMu.Unlock()

@@ -17,6 +17,19 @@
 let
   cfg = config.services.fireteact;
 
+  # Calculate network values for DHCP configuration
+  subnetParts = lib.splitString "/" cfg.networking.subnet;
+  networkAddr = lib.head subnetParts;
+  subnetMask = lib.elemAt subnetParts 1;
+  networkOctets = lib.splitString "." networkAddr;
+  networkPrefix = "${lib.elemAt networkOctets 0}.${lib.elemAt networkOctets 1}.${lib.elemAt networkOctets 2}";
+  gateway = "${networkPrefix}.1";
+
+  # DHCP range (for /24 subnet: .2 to .254)
+  dhcpStart = "${networkPrefix}.2";
+  dhcpEnd = "${networkPrefix}.254";
+  netmask = if subnetMask == "24" then "255.255.255.0" else "255.255.255.0";
+
   # Import kernel packages (shared with fireactions)
   firecrackerKernelPkg = pkgs.callPackage ../../pkgs/firecracker-kernel.nix {
     kernelVersion = cfg.kernelVersion;
@@ -317,10 +330,18 @@ in
           ''}
 
           # Inject secrets into config using Python for proper YAML handling
-          export API_TOKEN_FILE="${lib.optionalString (cfg.gitea.apiTokenFile != null) cfg.gitea.apiTokenFile}"
-          export INSTANCE_URL_FILE="${lib.optionalString (cfg.gitea.instanceUrlFile != null) cfg.gitea.instanceUrlFile}"
-          export RUNNER_OWNER_FILE="${lib.optionalString (cfg.gitea.runnerOwnerFile != null) cfg.gitea.runnerOwnerFile}"
-          export RUNNER_REPO_FILE="${lib.optionalString (cfg.gitea.runnerRepoFile != null) cfg.gitea.runnerRepoFile}"
+          export API_TOKEN_FILE="${
+            lib.optionalString (cfg.gitea.apiTokenFile != null) cfg.gitea.apiTokenFile
+          }"
+          export INSTANCE_URL_FILE="${
+            lib.optionalString (cfg.gitea.instanceUrlFile != null) cfg.gitea.instanceUrlFile
+          }"
+          export RUNNER_OWNER_FILE="${
+            lib.optionalString (cfg.gitea.runnerOwnerFile != null) cfg.gitea.runnerOwnerFile
+          }"
+          export RUNNER_REPO_FILE="${
+            lib.optionalString (cfg.gitea.runnerRepoFile != null) cfg.gitea.runnerRepoFile
+          }"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
 
@@ -335,17 +356,22 @@ in
 
     systemd.services.fireteact =
       let
-        needsConfigService = cfg.configFile == null && (
-          cfg.gitea.apiTokenFile != null
-          || cfg.gitea.instanceUrlFile != null
-          || cfg.gitea.runnerOwnerFile != null
-          || cfg.gitea.runnerRepoFile != null
-        );
+        needsConfigService =
+          cfg.configFile == null
+          && (
+            cfg.gitea.apiTokenFile != null
+            || cfg.gitea.instanceUrlFile != null
+            || cfg.gitea.runnerOwnerFile != null
+            || cfg.gitea.runnerRepoFile != null
+          );
         # Use runtime config if secrets need injection, otherwise static config
         effectiveConfigPath =
-          if needsConfigService then "/run/fireteact/config.yaml"
-          else if cfg.configFile != null then cfg.configFile
-          else "/etc/fireteact/config.yaml";
+          if needsConfigService then
+            "/run/fireteact/config.yaml"
+          else if cfg.configFile != null then
+            cfg.configFile
+          else
+            "/etc/fireteact/config.yaml";
       in
       {
         description = "Fireteact - Gitea Actions Runner Manager";
@@ -354,9 +380,29 @@ in
           "network-online.target"
           "containerd.service"
           "fireteact-kernel-setup.service"
-        ] ++ lib.optional needsConfigService "fireteact-config.service";
+        ]
+        ++ lib.optional needsConfigService "fireteact-config.service";
         requires = [ "containerd.service" ] ++ lib.optional needsConfigService "fireteact-config.service";
         wants = [ "network-online.target" ];
+
+        # Add required tools to PATH for CNI plugins
+        path = [
+          pkgs.firecracker
+          pkgs.containerd
+          pkgs.runc
+          pkgs.cni-plugins
+          tcRedirectTapPkg
+          pkgs.iptables
+          pkgs.iproute2
+        ];
+
+        environment = {
+          CNI_PATH = lib.makeBinPath [
+            pkgs.cni-plugins
+            tcRedirectTapPkg
+          ];
+          NETCONFPATH = "/etc/cni/conf.d";
+        };
 
         serviceConfig = {
           Type = "simple";
@@ -409,9 +455,21 @@ in
     systemd.network.networks."50-fireteact-bridge" = {
       matchConfig.Name = cfg.networking.bridgeName;
       networkConfig = {
-        Address = lib.head (lib.splitString "/" cfg.networking.subnet) + "/24";
         ConfigureWithoutCarrier = true;
       };
+      # Assign gateway IP to the bridge (first IP in subnet)
+      # CNI expects the bridge to have the gateway IP for routing
+      address = [
+        (let
+          # Parse subnet like "10.201.0.0/24" to get gateway "10.201.0.1/24"
+          parts = lib.splitString "/" cfg.networking.subnet;
+          network = lib.head parts;
+          prefix = lib.last parts;
+          octets = lib.splitString "." network;
+          gateway = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}.1/${prefix}";
+        in gateway)
+      ];
+      linkConfig.RequiredForOnline = "no";
     };
 
     systemd.network.netdevs."50-fireteact-bridge" = {
@@ -434,6 +492,40 @@ in
     networking.firewall = {
       # Allow traffic from fireteact VMs to internet
       trustedInterfaces = [ cfg.networking.bridgeName ];
+    };
+
+    #
+    # DNSMASQ (DHCP + DNS for VMs)
+    #
+    # VMs use DHCP to get their IP address from dnsmasq running on the bridge
+    # Use lib.mkAfter for list settings to merge with fireactions' registry-cache dnsmasq config
+    services.dnsmasq = {
+      enable = true;
+      settings = {
+        # Add fireteact bridge interface (merges with fireactions' interface if both enabled)
+        interface = lib.mkAfter [ cfg.networking.bridgeName ];
+        bind-interfaces = true;
+
+        # DNS settings (only set if not already configured by fireactions)
+        no-resolv = lib.mkDefault true;
+        server = lib.mkDefault [ "8.8.8.8" "1.1.1.1" ];
+        cache-size = lib.mkDefault 1000;
+        log-queries = lib.mkDefault false;
+
+        # DHCP settings for fireteact subnet (merges with fireactions' dhcp-range)
+        dhcp-range = lib.mkAfter [ "${dhcpStart},${dhcpEnd},${netmask},12h" ];
+        dhcp-option = lib.mkAfter [
+          "3,${gateway}"  # Gateway for fireteact subnet
+          "6,${gateway}"  # DNS server for fireteact subnet
+        ];
+        dhcp-rapid-commit = lib.mkDefault true;
+      };
+    };
+
+    # Ensure dnsmasq waits for the bridge interface to be created
+    systemd.services.dnsmasq = {
+      after = [ "sys-subsystem-net-devices-${cfg.networking.bridgeName}.device" ];
+      wants = [ "sys-subsystem-net-devices-${cfg.networking.bridgeName}.device" ];
     };
   };
 }

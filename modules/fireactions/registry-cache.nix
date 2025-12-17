@@ -499,13 +499,15 @@ in
     services.dnsmasq = {
       enable = true;
       settings = {
-        interface = fireactionsCfg.networking.bridgeName;
+        # Use list for interface so it can merge with fireteact's interface
+        interface = [ fireactionsCfg.networking.bridgeName ];
         bind-interfaces = true;
         no-resolv = true;
         server = cfg.dns.upstreamServers;
         cache-size = 1000;
         log-queries = false;
-        dhcp-range = "${dhcpStart},${dhcpEnd},${netmask},12h";
+        # Use list for dhcp-range so it can merge with fireteact's range
+        dhcp-range = [ "${dhcpStart},${dhcpEnd},${netmask},12h" ];
         dhcp-option = [
           "3,${gateway}"
           "6,${gateway}"

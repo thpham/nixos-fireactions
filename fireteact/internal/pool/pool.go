@@ -335,6 +335,9 @@ func (p *Pool) createRunnerVM(runnerID, runnerName string) {
 	// Prepare VM configuration with runner metadata
 	// The fireteact runner agent inside the VM reads this metadata from MMDS
 	// at /latest/meta-data/fireteact to register with Gitea and start act_runner
+	//
+	// IMPORTANT: cloud-init EC2 datasource requires instance-id and local-hostname
+	// at /version/meta-data/ level for the datasource to be recognized as valid.
 	vmConfig := firecracker.VMConfig{
 		ID:         runnerID,
 		Name:       runnerName,
@@ -346,6 +349,10 @@ func (p *Pool) createRunnerVM(runnerID, runnerName string) {
 		Image:      p.cfg.Runner.Image,
 		Labels:     p.cfg.Runner.Labels,
 		Metadata: map[string]interface{}{
+			// Required EC2 metadata fields for cloud-init compatibility
+			// cloud-init checks /2009-04-04/meta-data/instance-id first
+			"instance-id":    runnerID,
+			"local-hostname": runnerName,
 			// fireteact metadata - read by fireteact runner agent inside VM
 			// These fields match runner/mmds.Metadata struct
 			"fireteact": map[string]interface{}{
