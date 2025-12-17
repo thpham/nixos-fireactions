@@ -199,9 +199,20 @@ in
     # Gitea configuration
     gitea = {
       instanceUrl = lib.mkOption {
-        type = lib.types.str;
+        type = lib.types.nullOr lib.types.str;
+        default = null;
         description = "Gitea instance URL (e.g., https://gitea.example.com)";
         example = "https://gitea.example.com";
+      };
+
+      instanceUrlFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          Path to a file containing the Gitea instance URL.
+          Takes precedence over instanceUrl if both are set.
+          This should be a secret file managed by sops-nix.
+        '';
       };
 
       apiToken = lib.mkOption {
@@ -259,6 +270,16 @@ in
         example = "my-org";
       };
 
+      runnerOwnerFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          Path to a file containing the runner owner name.
+          Takes precedence over runnerOwner if both are set.
+          This should be a secret file managed by sops-nix.
+        '';
+      };
+
       runnerRepo = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -267,6 +288,16 @@ in
           Required when runnerScope is "repo".
         '';
         example = "my-repo";
+      };
+
+      runnerRepoFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = ''
+          Path to a file containing the runner repository name.
+          Takes precedence over runnerRepo if both are set.
+          This should be a secret file managed by sops-nix.
+        '';
       };
     };
 
@@ -336,15 +367,15 @@ in
       {
         assertion =
           cfg.configFile != null
-          || (cfg.pools != [ ] && cfg.gitea.instanceUrl != null && (cfg.gitea.apiToken != null || cfg.gitea.apiTokenFile != null));
-        message = "Either configFile must be set, or pools, gitea.instanceUrl, and gitea.apiToken/apiTokenFile must be configured";
+          || (cfg.pools != [ ] && (cfg.gitea.instanceUrl != null || cfg.gitea.instanceUrlFile != null) && (cfg.gitea.apiToken != null || cfg.gitea.apiTokenFile != null));
+        message = "Either configFile must be set, or pools, gitea.instanceUrl/instanceUrlFile, and gitea.apiToken/apiTokenFile must be configured";
       }
       {
         assertion =
           cfg.gitea.runnerScope == "instance"
-          || (cfg.gitea.runnerScope == "org" && cfg.gitea.runnerOwner != null)
-          || (cfg.gitea.runnerScope == "repo" && cfg.gitea.runnerOwner != null && cfg.gitea.runnerRepo != null);
-        message = "runnerOwner is required for org scope; runnerOwner and runnerRepo are required for repo scope";
+          || (cfg.gitea.runnerScope == "org" && (cfg.gitea.runnerOwner != null || cfg.gitea.runnerOwnerFile != null))
+          || (cfg.gitea.runnerScope == "repo" && (cfg.gitea.runnerOwner != null || cfg.gitea.runnerOwnerFile != null) && (cfg.gitea.runnerRepo != null || cfg.gitea.runnerRepoFile != null));
+        message = "runnerOwner/runnerOwnerFile is required for org scope; runnerOwner/runnerOwnerFile and runnerRepo/runnerRepoFile are required for repo scope";
       }
     ];
   };

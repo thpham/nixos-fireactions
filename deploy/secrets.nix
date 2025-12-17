@@ -64,19 +64,8 @@
         restartUnits = [ "fireactions-config.service" ];
       };
 
-      # Gitea API token for fireteact (dynamic runner registration)
-      "gitea-api-token" = {
-        # Path in secrets.yaml: gitea_api_token
-        key = "gitea_api_token";
-
-        # Permissions
-        mode = "0400";
-        owner = "root";
-        group = "root";
-
-        # Restart fireteact-config when secret changes
-        restartUnits = [ "fireteact-config.service" ];
-      };
+      # Gitea secrets for fireteact are defined in modules/fireteact/default.nix
+      # They are conditional based on which *File options are used
     };
   };
 }

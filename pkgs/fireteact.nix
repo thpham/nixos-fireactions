@@ -13,9 +13,9 @@ buildGoModule {
 
   src = ../fireteact;
 
-  # Use null to vendor dependencies using go.sum checksums
-  # This works reliably across platforms without needing to compute the hash
-  vendorHash = null;
+  # Vendor hash for Go module dependencies
+  # To update: set to lib.fakeHash, build on Linux, use hash from error message
+  vendorHash = "sha256-ferq9Kel0xz+ggDzf4QiAP+yi0koJa7sARujt4/Yios=";
 
   subPackages = [ "cmd/fireteact" ];
 

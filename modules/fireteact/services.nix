@@ -264,7 +264,11 @@ in
 
     systemd.services.fireteact-config =
       let
-        needsSecrets = cfg.gitea.apiTokenFile != null;
+        needsSecrets =
+          cfg.gitea.apiTokenFile != null
+          || cfg.gitea.instanceUrlFile != null
+          || cfg.gitea.runnerOwnerFile != null
+          || cfg.gitea.runnerRepoFile != null;
         needsConfigService = cfg.configFile == null && needsSecrets;
       in
       lib.mkIf needsConfigService {
@@ -291,10 +295,32 @@ in
             fi
           ''}
 
-          # Inject API token into config using Python for proper YAML handling
-          export API_TOKEN_FILE="${
-            lib.optionalString (cfg.gitea.apiTokenFile != null) cfg.gitea.apiTokenFile
-          }"
+          ${lib.optionalString (cfg.gitea.instanceUrlFile != null) ''
+            if [ ! -f "${cfg.gitea.instanceUrlFile}" ]; then
+              echo "ERROR: Gitea instance URL file not found: ${cfg.gitea.instanceUrlFile}"
+              exit 1
+            fi
+          ''}
+
+          ${lib.optionalString (cfg.gitea.runnerOwnerFile != null) ''
+            if [ ! -f "${cfg.gitea.runnerOwnerFile}" ]; then
+              echo "ERROR: Gitea runner owner file not found: ${cfg.gitea.runnerOwnerFile}"
+              exit 1
+            fi
+          ''}
+
+          ${lib.optionalString (cfg.gitea.runnerRepoFile != null) ''
+            if [ ! -f "${cfg.gitea.runnerRepoFile}" ]; then
+              echo "ERROR: Gitea runner repo file not found: ${cfg.gitea.runnerRepoFile}"
+              exit 1
+            fi
+          ''}
+
+          # Inject secrets into config using Python for proper YAML handling
+          export API_TOKEN_FILE="${lib.optionalString (cfg.gitea.apiTokenFile != null) cfg.gitea.apiTokenFile}"
+          export INSTANCE_URL_FILE="${lib.optionalString (cfg.gitea.instanceUrlFile != null) cfg.gitea.instanceUrlFile}"
+          export RUNNER_OWNER_FILE="${lib.optionalString (cfg.gitea.runnerOwnerFile != null) cfg.gitea.runnerOwnerFile}"
+          export RUNNER_REPO_FILE="${lib.optionalString (cfg.gitea.runnerRepoFile != null) cfg.gitea.runnerRepoFile}"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
 
@@ -309,7 +335,12 @@ in
 
     systemd.services.fireteact =
       let
-        needsConfigService = cfg.configFile == null && cfg.gitea.apiTokenFile != null;
+        needsConfigService = cfg.configFile == null && (
+          cfg.gitea.apiTokenFile != null
+          || cfg.gitea.instanceUrlFile != null
+          || cfg.gitea.runnerOwnerFile != null
+          || cfg.gitea.runnerRepoFile != null
+        );
         # Use runtime config if secrets need injection, otherwise static config
         effectiveConfigPath =
           if needsConfigService then "/run/fireteact/config.yaml"
@@ -391,11 +422,12 @@ in
     };
 
     # NAT for fireteact subnet
+    # Use mkDefault to allow provider-specific overrides and merge with fireactions
     networking.nat = {
-      enable = true;
+      enable = lib.mkDefault true;
       internalInterfaces = [ cfg.networking.bridgeName ];
       internalIPs = [ cfg.networking.subnet ];
-      externalInterface = cfg.networking.externalInterface;
+      externalInterface = lib.mkDefault cfg.networking.externalInterface;
     };
 
     # Firewall rules for fireteact
