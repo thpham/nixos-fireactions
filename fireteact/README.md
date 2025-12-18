@@ -115,9 +115,10 @@ pools:
       kernelPath: "/var/lib/fireteact/kernels/vmlinux"
       kernelArgs: "console=ttyS0 reboot=k panic=1 pci=off"
 
+# Optional: containerd and cni settings (defaults shown below)
+# Images are stored in per-pool namespaces for isolation
 containerd:
   address: "/run/containerd/containerd.sock"
-  namespace: "fireteact"
   snapshotter: "devmapper"
 
 cni:

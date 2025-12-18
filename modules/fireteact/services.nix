@@ -119,9 +119,10 @@ let
       };
     }) cfg.pools;
 
+    # containerd settings use sensible defaults, only override if needed
+    # Images are stored in per-pool namespaces (pool.name) for isolation
     containerd = {
       address = "/run/containerd/containerd.sock";
-      namespace = "fireteact";
       snapshotter = "devmapper";
     };
 

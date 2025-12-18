@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/nerdctl/pkg/imgutil/dockerconfigresolver"
 	"github.com/distribution/reference"
@@ -52,6 +53,7 @@ type VMConfig struct {
 type VM struct {
 	ID          string
 	Name        string
+	PoolName    string
 	IPAddress   string
 	SocketPath  string
 	machine     *firecracker.Machine
@@ -73,9 +75,10 @@ type Manager struct {
 // NewManager creates a new Firecracker VM manager.
 func NewManager(cfg *config.Config, log *logrus.Logger) (*Manager, error) {
 	// Connect to containerd
+	// Note: We don't set a default namespace here because all operations
+	// use per-pool namespaces via namespaces.WithNamespace(ctx, poolName)
 	client, err := containerd.New(
 		cfg.Containerd.Address,
-		containerd.WithDefaultNamespace(cfg.Containerd.Namespace),
 		containerd.WithTimeout(10*time.Second),
 	)
 	if err != nil {
@@ -216,23 +219,26 @@ func (m *Manager) CreateVM(ctx context.Context, vmCfg VMConfig) (*VM, error) {
 	}
 	poolDir := m.GetPoolDir(vmCfg.PoolName)
 
-	// Pull or get image
-	image, err := m.ensureImage(ctx, vmCfg.Image, vmCfg.PoolName)
+	// Use pool name as containerd namespace for resource isolation
+	nsCtx := namespaces.WithNamespace(ctx, vmCfg.PoolName)
+
+	// Pull or get image in pool's namespace
+	image, err := m.ensureImage(nsCtx, vmCfg.Image, vmCfg.PoolName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure image: %w", err)
 	}
 
-	// Create containerd lease for this VM
+	// Create containerd lease for this VM in pool's namespace
 	leaseID := fmt.Sprintf("fireteact/pools/%s/%s", vmCfg.PoolName, vmID)
-	leaseCtx, leaseCancel, err := m.containerd.WithLease(ctx, leases.WithID(leaseID))
+	leaseCtx, leaseCancel, err := m.containerd.WithLease(nsCtx, leases.WithID(leaseID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create containerd lease: %w", err)
 	}
 
-	// Create snapshot from image
+	// Create snapshot from image in pool's namespace
 	snapshotMounts, err := m.createSnapshot(leaseCtx, image, vmID)
 	if err != nil {
-		_ = leaseCancel(ctx)
+		_ = leaseCancel(nsCtx)
 		return nil, fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
@@ -240,7 +246,7 @@ func (m *Manager) CreateVM(ctx context.Context, vmCfg VMConfig) (*VM, error) {
 	logFilePath := filepath.Join(poolDir, fmt.Sprintf("%s.log", vmID))
 	logFile, err := os.Create(logFilePath)
 	if err != nil {
-		_ = leaseCancel(ctx)
+		_ = leaseCancel(nsCtx)
 		return nil, fmt.Errorf("failed to create log file: %w", err)
 	}
 
@@ -302,7 +308,7 @@ func (m *Manager) CreateVM(ctx context.Context, vmCfg VMConfig) (*VM, error) {
 
 	if err != nil {
 		_ = logFile.Close()
-		_ = leaseCancel(ctx)
+		_ = leaseCancel(nsCtx)
 		return nil, fmt.Errorf("failed to create Firecracker machine: %w", err)
 	}
 
@@ -342,7 +348,7 @@ func (m *Manager) CreateVM(ctx context.Context, vmCfg VMConfig) (*VM, error) {
 	// Start the VM
 	if err := machine.Start(context.Background()); err != nil {
 		_ = logFile.Close()
-		_ = leaseCancel(ctx)
+		_ = leaseCancel(nsCtx)
 		return nil, fmt.Errorf("failed to start Firecracker VM: %w", err)
 	}
 
@@ -358,6 +364,7 @@ func (m *Manager) CreateVM(ctx context.Context, vmCfg VMConfig) (*VM, error) {
 	vm := &VM{
 		ID:          vmID,
 		Name:        vmCfg.Name,
+		PoolName:    vmCfg.PoolName,
 		IPAddress:   ipAddr,
 		SocketPath:  socketPath,
 		machine:     machine,
@@ -400,10 +407,11 @@ func (m *Manager) DestroyVM(vmID string) error {
 		cancel()
 	}
 
-	// Clean up containerd lease
+	// Clean up containerd lease in pool's namespace
 	if vm.leaseCancel != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := vm.leaseCancel(ctx); err != nil && !errdefs.IsNotFound(err) {
+		nsCtx := namespaces.WithNamespace(ctx, vm.PoolName)
+		if err := vm.leaseCancel(nsCtx); err != nil && !errdefs.IsNotFound(err) {
 			m.log.Warnf("Failed to remove containerd lease for %s: %v", vmID, err)
 		}
 		cancel()
@@ -468,14 +476,18 @@ func (m *Manager) ListVMs() []*VM {
 }
 
 // ensureImage pulls an image if not present and returns it.
+// Images are stored in a per-pool namespace for isolation.
 func (m *Manager) ensureImage(ctx context.Context, ref string, poolName string) (containerd.Image, error) {
 	m.containerdMu.Lock()
 	defer m.containerdMu.Unlock()
 
-	// Check if image already exists
-	image, err := m.containerd.GetImage(ctx, ref)
+	// Use pool name as containerd namespace for image isolation
+	nsCtx := namespaces.WithNamespace(ctx, poolName)
+
+	// Check if image already exists in pool's namespace
+	image, err := m.containerd.GetImage(nsCtx, ref)
 	if err == nil {
-		m.log.Debugf("Image %s already exists", ref)
+		m.log.Debugf("Image %s already exists in namespace %s", ref, poolName)
 		return image, nil
 	}
 
@@ -483,7 +495,7 @@ func (m *Manager) ensureImage(ctx context.Context, ref string, poolName string) 
 		return nil, fmt.Errorf("failed to check image: %w", err)
 	}
 
-	m.log.Infof("Pulling image %s", ref)
+	m.log.Infof("Pulling image %s into namespace %s", ref, poolName)
 	start := time.Now()
 
 	// Parse docker reference
@@ -505,7 +517,7 @@ func (m *Manager) ensureImage(ctx context.Context, ref string, poolName string) 
 		snapshotter = DefaultSnapshotter
 	}
 
-	image, err = m.containerd.Pull(ctx, ref,
+	image, err = m.containerd.Pull(nsCtx, ref,
 		containerd.WithPullUnpack,
 		containerd.WithResolver(resolver),
 		containerd.WithPullSnapshotter(snapshotter),
@@ -514,7 +526,7 @@ func (m *Manager) ensureImage(ctx context.Context, ref string, poolName string) 
 		return nil, fmt.Errorf("failed to pull image: %w", err)
 	}
 
-	m.log.Infof("Image %s pulled in %s", ref, time.Since(start))
+	m.log.Infof("Image %s pulled into namespace %s in %s", ref, poolName, time.Since(start))
 	return image, nil
 }
 

@@ -64,9 +64,10 @@ type FirecrackerConfig struct {
 }
 
 // ContainerdConfig holds containerd connection settings.
+// Note: Images are stored in per-pool namespaces (using pool name as namespace)
+// for resource isolation between pools.
 type ContainerdConfig struct {
 	Address     string `yaml:"address"`
-	Namespace   string `yaml:"namespace"`
 	Snapshotter string `yaml:"snapshotter"`
 }
 
@@ -127,9 +128,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Containerd.Address == "" {
 		c.Containerd.Address = "/run/containerd/containerd.sock"
-	}
-	if c.Containerd.Namespace == "" {
-		c.Containerd.Namespace = "fireteact"
 	}
 	if c.Containerd.Snapshotter == "" {
 		c.Containerd.Snapshotter = "devmapper"
