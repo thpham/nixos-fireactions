@@ -58,6 +58,7 @@ type Pool struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	scaleTicker *time.Ticker
+	scaleSignal chan struct{} // Signal channel for immediate scaling after runner completion
 	isActive    bool
 }
 
@@ -69,13 +70,14 @@ func New(cfg *config.PoolConfig, giteaClient *gitea.Client, globalCfg *config.Co
 	}
 
 	p := &Pool{
-		cfg:       cfg,
-		globalCfg: globalCfg,
-		gitea:     giteaClient,
-		vmManager: vmManager,
-		log:       log,
-		runners:   make(map[string]*RunnerInfo),
-		isActive:  true,
+		cfg:         cfg,
+		globalCfg:   globalCfg,
+		gitea:       giteaClient,
+		vmManager:   vmManager,
+		log:         log,
+		runners:     make(map[string]*RunnerInfo),
+		scaleSignal: make(chan struct{}, 1), // Buffered to avoid blocking monitorRunner
+		isActive:    true,
 	}
 
 	// Initialize Prometheus metrics for this pool
@@ -134,7 +136,8 @@ func (p *Pool) Start(ctx context.Context) error {
 }
 
 // Stop gracefully stops the pool and all runners.
-// This includes unregistering runners from Gitea and destroying VMs.
+// This includes unregistering active runners from Gitea and destroying VMs.
+// Runners that already completed (ephemeral mode) are auto-deregistered by Gitea.
 func (p *Pool) Stop() error {
 	p.cancel()
 	if p.scaleTicker != nil {
@@ -151,17 +154,23 @@ func (p *Pool) Stop() error {
 	defer cancel()
 
 	for id, runner := range p.runners {
-		// First, try to unregister the runner from Gitea
+		// Skip runners that already completed - ephemeral runners auto-deregister from Gitea
+		if runner.Status == RunnerStateStopped || runner.Status == RunnerStateFailed {
+			p.log.Debugf("Skipping cleanup for completed runner %s (status: %s)", id, runner.Status)
+			continue
+		}
+
+		// For active runners, try to unregister from Gitea
 		// This prevents the runner from showing as offline in Gitea UI
-		if runner.Name != "" {
-			p.log.Infof("Unregistering runner %s from Gitea", runner.Name)
+		if runner.Name != "" && runner.Status != RunnerStateStopped {
+			p.log.Infof("Unregistering active runner %s from Gitea", runner.Name)
 			if err := p.gitea.DeleteRunnerByName(shutdownCtx, runner.Name); err != nil {
 				p.log.Warnf("Failed to unregister runner %s from Gitea: %v", runner.Name, err)
 				// Continue with VM destruction even if unregistration fails
 			}
 		}
 
-		// Then destroy the VM
+		// Destroy the VM if it's still running
 		if runner.VMID != "" {
 			p.log.Infof("Stopping runner %s (VM: %s)", id, runner.VMID)
 			if err := p.vmManager.DestroyVM(runner.VMID); err != nil {
@@ -216,6 +225,7 @@ func (p *Pool) IsActive() bool {
 }
 
 // scalingLoop periodically checks and adjusts the pool size.
+// It responds to both periodic ticks and immediate signals from runner completion.
 func (p *Pool) scalingLoop() {
 	defer p.wg.Done()
 
@@ -224,6 +234,10 @@ func (p *Pool) scalingLoop() {
 		case <-p.ctx.Done():
 			return
 		case <-p.scaleTicker.C:
+			p.checkAndScale()
+		case <-p.scaleSignal:
+			// Immediate scale check triggered by runner completion
+			p.log.Debug("Immediate scale check triggered by runner completion")
 			p.checkAndScale()
 		}
 	}
@@ -275,20 +289,50 @@ func (p *Pool) checkAndScale() {
 		targetRunners = min(p.cfg.MinRunners+queueDepth, p.cfg.MaxRunners)
 	}
 
-	p.log.Debugf("Pool %s: active=%d, idle=%d, busy=%d, queue=%d, target=%d", p.cfg.Name, activeCount, idleCount, busyCount, queueDepth, targetRunners)
-
-	// Scale up if needed
-	for activeCount < targetRunners {
-		if err := p.spawnRunnerLocked(); err != nil {
-			p.log.Errorf("Failed to spawn runner: %v", err)
-			break
+	// Count stopped/failed runners that will be cleaned up and replaced
+	stoppedCount := 0
+	for _, r := range p.runners {
+		if r.Status == RunnerStateStopped || r.Status == RunnerStateFailed {
+			stoppedCount++
 		}
-		activeCount++
 	}
 
-	// Clean up stopped/failed runners
+	p.log.WithFields(logrus.Fields{
+		"pool":    p.cfg.Name,
+		"active":  activeCount,
+		"idle":    idleCount,
+		"busy":    busyCount,
+		"stopped": stoppedCount,
+		"queue":   queueDepth,
+		"target":  targetRunners,
+	}).Debug("Pool scaling check")
+
+	// Scale up if needed - this handles both initial scale-up and replacement after job completion
+	runnersToSpawn := targetRunners - activeCount
+	if runnersToSpawn > 0 {
+		if stoppedCount > 0 {
+			p.log.WithFields(logrus.Fields{
+				"pool":            p.cfg.Name,
+				"stopped_runners": stoppedCount,
+				"spawning":        runnersToSpawn,
+			}).Info("Spawning replacement runners for completed ephemeral runners")
+		}
+
+		for i := 0; i < runnersToSpawn; i++ {
+			if err := p.spawnRunnerLocked(); err != nil {
+				p.log.Errorf("Failed to spawn runner: %v", err)
+				break
+			}
+		}
+	}
+
+	// Clean up stopped/failed runners from the map
 	for id, r := range p.runners {
 		if r.Status == RunnerStateStopped || r.Status == RunnerStateFailed {
+			p.log.WithFields(logrus.Fields{
+				"runner_id": id,
+				"status":    r.Status,
+			}).Debug("Removing completed runner from pool tracking")
 			delete(p.runners, id)
 		}
 	}
@@ -430,25 +474,65 @@ func (p *Pool) updateRunnerStatus(runnerID string, status RunnerState, vmID, ipA
 }
 
 // monitorRunner watches a runner VM and cleans up when it exits.
+// When a job completes, the ephemeral act_runner exits, causing the VM to terminate.
+// This triggers cleanup and the scaling loop will spawn a replacement runner.
 func (p *Pool) monitorRunner(runnerID, vmID string, startTime time.Time) {
-	// Wait for VM to exit (this is where the magic happens -
-	// act_runner in ephemeral mode will exit after completing a job)
+	// Wait for VM to exit - act_runner in ephemeral mode exits after completing a job
 	err := p.vmManager.WaitForExit(p.ctx, vmID)
+
+	lifetime := time.Since(startTime)
+
 	if err != nil && p.ctx.Err() == nil {
-		p.log.Errorf("Runner %s VM exited with error: %v", runnerID, err)
+		p.log.WithFields(logrus.Fields{
+			"runner_id": runnerID,
+			"vm_id":     vmID,
+			"lifetime":  lifetime.Round(time.Second),
+			"error":     err,
+		}).Error("Runner VM exited with error")
+	} else if p.ctx.Err() != nil {
+		p.log.WithFields(logrus.Fields{
+			"runner_id": runnerID,
+			"vm_id":     vmID,
+			"lifetime":  lifetime.Round(time.Second),
+		}).Info("Runner stopped due to shutdown signal")
 	} else {
-		p.log.Infof("Runner %s completed (VM exited)", runnerID)
+		p.log.WithFields(logrus.Fields{
+			"runner_id": runnerID,
+			"vm_id":     vmID,
+			"lifetime":  lifetime.Round(time.Second),
+		}).Info("Runner completed job and exited (ephemeral mode)")
 	}
 
 	// Record VM lifetime
-	metricVMLifetimeDuration.WithLabelValues(p.cfg.Name).Observe(time.Since(startTime).Seconds())
+	metricVMLifetimeDuration.WithLabelValues(p.cfg.Name).Observe(lifetime.Seconds())
 
-	// Mark runner as stopped
+	// Mark runner as stopped - this will trigger replacement via scaling loop
 	p.updateRunnerStatus(runnerID, RunnerStateStopped, "", "")
 
-	// Cleanup VM resources
+	// Cleanup VM resources (socket, logs, process)
+	p.log.WithFields(logrus.Fields{
+		"runner_id": runnerID,
+		"vm_id":     vmID,
+	}).Debug("Cleaning up VM resources")
+
 	if err := p.vmManager.DestroyVM(vmID); err != nil {
 		p.log.Warnf("Failed to cleanup VM %s: %v", vmID, err)
+	} else {
+		p.log.WithFields(logrus.Fields{
+			"runner_id": runnerID,
+			"vm_id":     vmID,
+		}).Info("VM resources cleaned up, runner slot available for replacement")
+	}
+
+	// Signal immediate scaling if not shutting down
+	// This avoids waiting for the next scaling loop tick (up to 10s delay)
+	if p.ctx.Err() == nil {
+		select {
+		case p.scaleSignal <- struct{}{}:
+			// Signal sent successfully
+		default:
+			// Channel already has a signal pending, no need to send another
+		}
 	}
 }
 

@@ -141,9 +141,11 @@ func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
 	}
 
 	// Build registration command
+	// Use --ephemeral to auto-deregister from Gitea after one job
 	args := []string{
 		"register",
 		"--no-interactive",
+		"--ephemeral",
 		"--instance", metadata.GiteaInstanceURL,
 		"--token", metadata.RegistrationToken,
 		"--name", metadata.RunnerName,
@@ -176,10 +178,12 @@ func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
 
 // Run starts the act_runner daemon and blocks until it exits.
 // This should be called after Register.
+// The daemon runs with --once flag to exit after completing one job.
 func (r *Runner) Run(ctx context.Context) error {
-	r.log.Info("Starting act_runner daemon")
+	r.log.Info("Starting act_runner daemon (ephemeral mode)")
 
-	args := []string{"daemon"}
+	// Use --once to exit after completing one job
+	args := []string{"daemon", "--once"}
 
 	// Add config file if it exists
 	if _, err := os.Stat(r.configPath); err == nil {
