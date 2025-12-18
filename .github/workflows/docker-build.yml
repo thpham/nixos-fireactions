@@ -55,7 +55,7 @@ on:
 
 jobs:
   build:
-    runs-on: [self-hosted, fireactions, linux, "${{ inputs.runner_size }}"]
+    runs-on: [self-hosted, linux, "${{ inputs.runner_size }}"]
 
     steps:
       - name: Checkout

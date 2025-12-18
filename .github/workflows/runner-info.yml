@@ -18,7 +18,6 @@ jobs:
     name: Collect Runner Information
     runs-on:
       - self-hosted
-      - fireactions
       - linux
       - ${{ inputs.runner_size }}
 
