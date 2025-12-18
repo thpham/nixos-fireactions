@@ -268,7 +268,7 @@ jobs:
           delete-untagged: true
           delete-ghost-images: true
           delete-partial-images: true
-          older-than: 7 days
+          older-than: 3 days
           keep-n-tagged: 5
 
       - name: Summary

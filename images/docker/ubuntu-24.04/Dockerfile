@@ -41,33 +41,50 @@ RUN apt-get update -y                              \
   && add-apt-repository -y ppa:git-core/ppa        \
   && apt-get update -y                             \
   && apt-get install -y --no-install-recommends    \
-    curl                                           \
-    dbus                                           \
-    kmod                                           \
-    iproute2                                       \
-    iputils-ping                                   \
-    iptables-persistent                            \
-    iptables                                       \
+    acl                                            \
+    bzip2                                          \
+    ca-certificates                                \
     cmake                                          \
     build-essential                                \
-    pkg-config                                     \
+    curl                                           \
+    dbus                                           \
+    file                                           \
+    git                                            \
+    git-lfs                                        \
+    gnupg                                          \
+    haveged                                        \
+    iproute2                                       \
+    iptables                                       \
+    iptables-persistent                            \
+    iputils-ping                                   \
+    jq                                             \
+    kmod                                           \
     libssl-dev                                     \
+    locales                                        \
+    lsb-release                                    \
     net-tools                                      \
     openssh-server                                 \
-    haveged                                        \
+    patch                                          \
+    pkg-config                                     \
+    python3                                        \
+    python3-pip                                    \
+    python3-venv                                   \
+    rsync                                          \
     sudo                                           \
     systemd                                        \
+    time                                           \
     udev                                           \
     unzip                                          \
-    ca-certificates                                \
-    jq                                             \
-    zip                                            \
-    gnupg                                          \
-    git-lfs                                        \
-    git                                            \
     vim-tiny                                       \
     wget                                           \
+    xz-utils                                       \
+    zip                                            \
+    zstd                                           \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Configure locale for UTF-8 support (required by many actions)
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 RUN systemctl enable haveged.service
 
@@ -101,6 +118,24 @@ RUN install -m 0755 -d /etc/apt/keyrings                                        
         docker-compose-plugin                                                                                       \
     && apt-get clean && rm -rf /var/lib/apt/lists/*                                                                 \
     && systemctl enable docker.service
+
+# Install Node.js (required for JavaScript-based actions like actions/checkout)
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs      \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Go (latest with security patches for crypto/x509 CVE fixes)
+ARG GO_VERSION="1.24.11"
+RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz \
+    | tar -C /usr/local -xzf - \
+    && mkdir -p /home/runner/go /home/runner/.cache/go-build \
+    && chown -R runner:runner /home/runner/go /home/runner/.cache
+
+ENV GOROOT="/usr/local/go" \
+    GOPATH="/home/runner/go" \
+    GOCACHE="/home/runner/.cache/go-build" \
+    GOMODCACHE="/home/runner/go/pkg/mod" \
+    PATH="/home/runner/go/bin:/usr/local/go/bin:${PATH}"
 
 # Configure SSH (for debug access)
 RUN sed -i -e 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config \
