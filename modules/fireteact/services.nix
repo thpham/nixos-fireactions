@@ -16,6 +16,8 @@
 
 let
   cfg = config.services.fireteact;
+  # Access fireactions registry cache config (shared infrastructure)
+  registryCacheCfg = config.services.fireactions.registryCache;
 
   # Calculate network values for DHCP configuration
   subnetParts = lib.splitString "/" cfg.networking.subnet;
@@ -283,15 +285,20 @@ in
           || cfg.gitea.runnerOwnerFile != null
           || cfg.gitea.runnerRepoFile != null
           || cfg.debug.sshKeyFile != null;
-        needsConfigService = cfg.configFile == null && needsSecrets;
+        # Also need config service if registry cache is enabled (for cloud-init user-data)
+        needsRegistryCache = registryCacheCfg.enable;
+        needsConfigService = cfg.configFile == null && (needsSecrets || needsRegistryCache);
       in
       lib.mkIf needsConfigService {
-        description = "Prepare fireteact config with secrets";
+        description = "Prepare fireteact config with secrets and registry-cache metadata";
         wantedBy = [ "fireteact.service" ];
         before = [ "fireteact.service" ];
         requiredBy = [ "fireteact.service" ];
 
         restartTriggers = [ configFile ];
+
+        # Wait for registry-cache CA to be generated (only if SSL bump is enabled)
+        after = lib.optional (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") "registry-cache-ca-setup.service";
 
         serviceConfig = {
           Type = "oneshot";
@@ -337,6 +344,14 @@ in
             fi
           ''}
 
+          ${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") ''
+            # Verify the registry-cache CA cert exists (only needed for SSL bump)
+            if [ ! -f "${registryCacheCfg._internal.caCertPath}" ]; then
+              echo "ERROR: Registry cache CA certificate not found: ${registryCacheCfg._internal.caCertPath}"
+              exit 1
+            fi
+          ''}
+
           # Inject secrets into config using Python for proper YAML handling
           export API_TOKEN_FILE="${
             lib.optionalString (cfg.gitea.apiTokenFile != null) cfg.gitea.apiTokenFile
@@ -353,6 +368,23 @@ in
           export DEBUG_SSH_KEY_FILE="${
             lib.optionalString (cfg.debug.sshKeyFile != null) cfg.debug.sshKeyFile
           }"
+
+          # Registry cache configuration (shared with fireactions)
+          # Fireteact VMs use their own gateway for DNS but share the registry cache
+          export FIRETEACT_GATEWAY="${gateway}"
+          export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.gateway}"
+
+          # Zot registry mirror configuration
+          export ZOT_ENABLED="${lib.boolToString (needsRegistryCache && registryCacheCfg.zot.enable)}"
+          export ZOT_PORT="${lib.optionalString needsRegistryCache (toString registryCacheCfg._internal.zotPort)}"
+          export ZOT_MIRRORS='${lib.optionalString needsRegistryCache (builtins.toJSON (
+            lib.mapAttrs (name: mirror: { url = mirror.url; }) registryCacheCfg._internal.zotMirrors
+          ))}'
+
+          # Squid SSL bump configuration
+          export SQUID_SSL_BUMP_MODE="${lib.optionalString needsRegistryCache registryCacheCfg._internal.squidSslBumpMode}"
+          export SQUID_SSL_BUMP_DOMAINS="${lib.optionalString needsRegistryCache (lib.concatStringsSep "," registryCacheCfg._internal.squidSslBumpDomains)}"
+          export SQUID_CA_FILE="${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") registryCacheCfg._internal.caCertPath}"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
 
@@ -531,10 +563,12 @@ in
         log-queries = lib.mkDefault false;
 
         # DHCP settings for fireteact subnet (merges with fireactions' dhcp-range)
-        dhcp-range = lib.mkAfter [ "${dhcpStart},${dhcpEnd},${netmask},12h" ];
+        # Use set: tag to scope this range, allowing per-subnet dhcp-options
+        dhcp-range = lib.mkAfter [ "set:fireteact,${dhcpStart},${dhcpEnd},${netmask},12h" ];
+        # Use tag: to scope options to fireteact subnet only
         dhcp-option = lib.mkAfter [
-          "3,${gateway}" # Gateway for fireteact subnet
-          "6,${gateway}" # DNS server for fireteact subnet
+          "tag:fireteact,3,${gateway}" # Gateway for fireteact subnet
+          "tag:fireteact,6,${gateway}" # DNS server for fireteact subnet
         ];
         dhcp-rapid-commit = lib.mkDefault true;
       };

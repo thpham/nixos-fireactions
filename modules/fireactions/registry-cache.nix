@@ -507,10 +507,12 @@ in
         cache-size = 1000;
         log-queries = false;
         # Use list for dhcp-range so it can merge with fireteact's range
-        dhcp-range = [ "${dhcpStart},${dhcpEnd},${netmask},12h" ];
+        # Use set: tag to scope this range, allowing per-subnet dhcp-options
+        dhcp-range = [ "set:fireactions,${dhcpStart},${dhcpEnd},${netmask},12h" ];
+        # Use tag: to scope options to fireactions subnet only
         dhcp-option = [
-          "3,${gateway}"
-          "6,${gateway}"
+          "tag:fireactions,3,${gateway}" # Gateway for fireactions subnet
+          "tag:fireactions,6,${gateway}" # DNS server for fireactions subnet
         ];
         dhcp-rapid-commit = true;
       };

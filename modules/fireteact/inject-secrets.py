@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Inject secrets into fireteact config.
+Inject secrets and registry-cache metadata into fireteact config.
 This script is called by fireteact-config.service at runtime.
 
 Handles:
 - Gitea API token injection (for dynamic runner registration)
 - Gitea instance URL injection (from sops secret)
 - Runner owner/repo injection (from sops secrets)
-- Debug SSH key injection into pool metadata (cloud-init user-data)
+- Registry cache configuration (containerd hosts.toml, Docker mirrors)
+- Squid SSL bump CA certificate (only when needed)
+- Debug SSH key injection
 """
 import yaml
 import os
+import json
 
 
 def read_secret_file(env_var):
@@ -57,8 +60,8 @@ if "gitea" in config:
     if runner_repo:
         config["gitea"]["runnerRepo"] = runner_repo
 
-# Build cloud-init user-data for pools (like fireactions does)
-# This injects the debug SSH key and other cloud-init config into pool metadata
+# Build cloud-init user-data for pools
+# This injects registry cache config, debug SSH key, and other cloud-init config
 if "pools" in config:
     # Initialize metadata for all pools
     for pool in config["pools"]:
@@ -74,6 +77,13 @@ if "pools" in config:
         if "instance-id" not in pool["firecracker"]["metadata"]:
             pool["firecracker"]["metadata"]["instance-id"] = f"i-fireteact-{pool_name}"
 
+    # Get gateway addresses
+    # FIRETEACT_GATEWAY is the fireteact subnet gateway (10.201.0.1) for DNS
+    # REGISTRY_CACHE_GATEWAY is the fireactions gateway (10.200.0.1) where Zot runs
+    fireteact_gateway = os.environ.get("FIRETEACT_GATEWAY", "")
+    registry_cache_gateway = os.environ.get("REGISTRY_CACHE_GATEWAY", "")
+    zot_enabled = os.environ.get("ZOT_ENABLED", "false") == "true"
+
     # Build cloud-init user-data
     user_data_lines = [
         "#cloud-config",
@@ -81,26 +91,218 @@ if "pools" in config:
         "",
     ]
 
+    # === CONTAINERD HOSTS.TOML FILES ===
+    # Generate containerd registry mirror configuration for Zot
+    if zot_enabled and registry_cache_gateway:
+        zot_port = os.environ.get("ZOT_PORT", "5000")
+        zot_mirrors_json = os.environ.get("ZOT_MIRRORS", "{}")
+
+        try:
+            zot_mirrors = json.loads(zot_mirrors_json)
+        except json.JSONDecodeError:
+            zot_mirrors = {}
+            print(f"Warning: Failed to parse ZOT_MIRRORS JSON: {zot_mirrors_json}")
+
+        if zot_mirrors:
+            user_data_lines.extend([
+                "# Containerd registry mirror configuration for Zot pull-through cache",
+                "# Each registry gets a hosts.toml that points to the local Zot mirror",
+                "write_files:",
+            ])
+
+            # Default upstream URLs for well-known registries
+            default_upstreams = {
+                "docker.io": "https://registry-1.docker.io",
+                "ghcr.io": "https://ghcr.io",
+                "quay.io": "https://quay.io",
+                "gcr.io": "https://gcr.io",
+            }
+
+            for registry_name, mirror_config in zot_mirrors.items():
+                # Get the upstream URL from mirror config or use default
+                if isinstance(mirror_config, dict):
+                    upstream_url = mirror_config.get("url", default_upstreams.get(registry_name, f"https://{registry_name}"))
+                else:
+                    upstream_url = default_upstreams.get(registry_name, f"https://{registry_name}")
+
+                # Generate hosts.toml content
+                # docker.io images are stored at root paths in Zot (e.g., /library/alpine)
+                # Other registries use namespaced paths (e.g., /ghcr.io/owner/repo)
+                if registry_name == "docker.io":
+                    # Docker Hub: images at root, no path override needed
+                    hosts_toml = f'''server = "{upstream_url}"
+
+[host."http://{registry_cache_gateway}:{zot_port}"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true'''
+                else:
+                    # Other registries: images under /{registry_name}/, use override_path
+                    hosts_toml = f'''server = "{upstream_url}"
+
+[host."http://{registry_cache_gateway}:{zot_port}"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true
+
+[host."http://{registry_cache_gateway}:{zot_port}/v2/{registry_name}"]
+  capabilities = ["pull", "resolve"]
+  override_path = true'''
+
+                user_data_lines.extend([
+                    f"  - path: /etc/containerd/certs.d/{registry_name}/hosts.toml",
+                    "    content: |",
+                ])
+                # Add hosts.toml content with proper indentation
+                for line in hosts_toml.split('\n'):
+                    user_data_lines.append(f"      {line}")
+
+            # === BUILDKIT CONFIG FOR BUILDX ===
+            # docker/setup-buildx-action creates a BuildKit container that doesn't inherit
+            # the host's containerd config. We need to provide a buildkitd.toml that Buildx
+            # can use via --config flag or BUILDKIT_CONFIG env var.
+            buildkit_config_lines = []
+            for registry_name in zot_mirrors.keys():
+                # BuildKit uses a different format than containerd
+                # The mirror URL should point to Zot's namespaced path
+                buildkit_config_lines.extend([
+                    f'[registry."{registry_name}"]',
+                    f'  mirrors = ["{registry_cache_gateway}:{zot_port}"]',
+                    f'  http = true',
+                    f'  insecure = true',
+                    '',
+                ])
+
+            buildkit_config = '\n'.join(buildkit_config_lines)
+
+            user_data_lines.extend([
+                f"  - path: /etc/buildkit/buildkitd.toml",
+                "    content: |",
+                "      # BuildKit registry mirrors for docker/setup-buildx-action",
+                "      # Use with: docker buildx create --config /etc/buildkit/buildkitd.toml",
+                "      # Or set BUILDKIT_CONFIG=/etc/buildkit/buildkitd.toml",
+            ])
+            for line in buildkit_config.split('\n'):
+                user_data_lines.append(f"      {line}")
+
+            # === DOCKER DAEMON.JSON ===
+            # Configure Docker daemon to use Zot as registry mirror
+            # This works for regular 'docker pull' commands
+            # Note: Docker only supports mirrors for docker.io (Docker Hub)
+            docker_daemon_config = {
+                "registry-mirrors": [f"http://{registry_cache_gateway}:{zot_port}"],
+                "insecure-registries": [f"{registry_cache_gateway}:{zot_port}"]
+            }
+            docker_daemon_json = json.dumps(docker_daemon_config, indent=2)
+
+            user_data_lines.extend([
+                f"  - path: /etc/docker/daemon.json",
+                "    content: |",
+            ])
+            for line in docker_daemon_json.split('\n'):
+                user_data_lines.append(f"      {line}")
+
+            print(f"Generated containerd hosts.toml for {len(zot_mirrors)} registries: {', '.join(zot_mirrors.keys())}")
+            print(f"Generated BuildKit config for Buildx at /etc/buildkit/buildkitd.toml")
+            print(f"Generated Docker daemon.json with registry mirror")
+
+    # === CA CERTIFICATE (only if Squid SSL bump is enabled for some domains) ===
+    squid_ssl_bump_mode = os.environ.get("SQUID_SSL_BUMP_MODE", "off")
+    squid_ssl_bump_domains = os.environ.get("SQUID_SSL_BUMP_DOMAINS", "")
+    squid_ca_file = os.environ.get("SQUID_CA_FILE", "")
+
+    # Only inject CA cert if:
+    # 1. SSL bump mode is "all" (needs CA everywhere), OR
+    # 2. SSL bump mode is "selective" AND domains are configured (needs CA for those domains)
+    needs_ca = (
+        squid_ssl_bump_mode == "all" or
+        (squid_ssl_bump_mode == "selective" and squid_ssl_bump_domains)
+    )
+
+    if needs_ca and squid_ca_file:
+        with open(squid_ca_file, "r") as f:
+            ca_cert_raw = f.read().rstrip('\n')
+
+        user_data_lines.extend([
+            "",
+            "# CA certificate for Squid SSL bump",
+            "# Required for HTTPS interception of configured domains",
+            "ca_certs:",
+            "  trusted:",
+            "    - |",
+        ])
+        for line in ca_cert_raw.split('\n'):
+            user_data_lines.append(f"      {line}")
+
+        print(f"Injected CA certificate for SSL bump mode: {squid_ssl_bump_mode}")
+
     # === DEBUG SSH KEY ===
     debug_ssh_key = read_secret_file("DEBUG_SSH_KEY_FILE")
     if debug_ssh_key:
         user_data_lines.extend([
+            "",
             "# SSH access for debugging",
             "users:",
             "  - name: root",
             "    ssh_authorized_keys:",
             f"      - {debug_ssh_key}",
-            "",
         ])
         print(f"Debug SSH key configured for VMs")
 
     # === RUNCMD SECTION ===
     user_data_lines.extend([
+        "",
         "# Runtime configuration via runcmd",
         "runcmd:",
-        "  # Fix DNS resolution - systemd-resolved is running but resolv.conf may be empty",
-        "  # Link to stub-resolv.conf which points to the local resolver at 127.0.0.53",
-        "  - ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf",
+    ])
+
+    # CA bundle fix (only if we injected a CA cert)
+    if needs_ca and squid_ca_file:
+        user_data_lines.extend([
+            "  # Fix Ubuntu 24.04 bug: ca_certs module creates hash symlinks but doesn't",
+            "  # add cert to /etc/ssl/certs/ca-certificates.crt bundle file.",
+            "  # curl/docker use the bundle file, not symlinks, so we must append manually.",
+            "  - |",
+            "    CA_CERT=$(ls /usr/local/share/ca-certificates/cloud-init-ca-cert-*.crt 2>/dev/null | head -1)",
+            '    if [ -n "$CA_CERT" ]; then',
+            "      update-ca-certificates",
+            '      cat "$CA_CERT" >> /etc/ssl/certs/ca-certificates.crt',
+            '      echo "CA cert added to bundle: $CA_CERT"',
+            "    fi",
+        ])
+
+    # Container runtime restarts (if Zot mirrors were configured)
+    if zot_enabled and registry_cache_gateway:
+        zot_mirrors_json = os.environ.get("ZOT_MIRRORS", "{}")
+        try:
+            zot_mirrors = json.loads(zot_mirrors_json)
+        except json.JSONDecodeError:
+            zot_mirrors = {}
+
+        if zot_mirrors:
+            user_data_lines.extend([
+                "  # Ensure containerd picks up the new registry mirrors",
+                "  - mkdir -p /etc/containerd/certs.d",
+                "  - mkdir -p /etc/buildkit",
+                "  - systemctl restart containerd || true",
+                "  # Restart Docker daemon to pick up registry mirror config",
+                "  - systemctl restart docker || true",
+                "  # Create a pre-configured Buildx builder that uses our registry mirrors",
+                "  - |",
+                "    if command -v docker &> /dev/null && [ -f /etc/buildkit/buildkitd.toml ]; then",
+                "      docker buildx create --name zot-cache --driver docker-container \\",
+                "        --config /etc/buildkit/buildkitd.toml --use 2>/dev/null || true",
+                "    fi",
+            ])
+
+    # DNS configuration
+    # Use fireteact gateway for DNS (10.201.0.1) which forwards to main dnsmasq
+    if fireteact_gateway:
+        user_data_lines.extend([
+            "  # Set DNS to use fireteact gateway (centralized DNS via dnsmasq)",
+            f"  - echo 'nameserver {fireteact_gateway}' > /etc/resolv.conf",
+        ])
+
+    # Hostname from MMDS
+    user_data_lines.extend([
         "  # Set hostname from MMDS metadata",
         "  - |",
         "    RUNNER_ID=$(curl -sf http://169.254.169.254/latest/meta-data/fireteact/runner_id)",

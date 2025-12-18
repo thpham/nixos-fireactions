@@ -134,6 +134,7 @@ func (p *Pool) Start(ctx context.Context) error {
 }
 
 // Stop gracefully stops the pool and all runners.
+// This includes unregistering runners from Gitea and destroying VMs.
 func (p *Pool) Stop() error {
 	p.cancel()
 	if p.scaleTicker != nil {
@@ -145,7 +146,22 @@ func (p *Pool) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Create a context with timeout for shutdown operations
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	for id, runner := range p.runners {
+		// First, try to unregister the runner from Gitea
+		// This prevents the runner from showing as offline in Gitea UI
+		if runner.Name != "" {
+			p.log.Infof("Unregistering runner %s from Gitea", runner.Name)
+			if err := p.gitea.DeleteRunnerByName(shutdownCtx, runner.Name); err != nil {
+				p.log.Warnf("Failed to unregister runner %s from Gitea: %v", runner.Name, err)
+				// Continue with VM destruction even if unregistration fails
+			}
+		}
+
+		// Then destroy the VM
 		if runner.VMID != "" {
 			p.log.Infof("Stopping runner %s (VM: %s)", id, runner.VMID)
 			if err := p.vmManager.DestroyVM(runner.VMID); err != nil {

@@ -95,7 +95,85 @@ func NewManager(cfg *config.Config, log *logrus.Logger) (*Manager, error) {
 		return nil, fmt.Errorf("failed to create pool directory: %w", err)
 	}
 
+	// Clean up stale resources from previous runs
+	m.cleanupStaleResources()
+
 	return m, nil
+}
+
+// cleanupStaleResources removes orphaned socket and log files from previous runs.
+// This is called on startup to clean up after unclean shutdowns.
+func (m *Manager) cleanupStaleResources() {
+	// Scan all pool directories
+	entries, err := os.ReadDir(DefaultPoolDir)
+	if err != nil {
+		m.log.Warnf("Failed to read pool directory %s: %v", DefaultPoolDir, err)
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		poolDir := filepath.Join(DefaultPoolDir, entry.Name())
+		m.cleanupPoolDirectory(poolDir)
+	}
+}
+
+// cleanupPoolDirectory removes stale socket and log files from a pool directory.
+func (m *Manager) cleanupPoolDirectory(poolDir string) {
+	files, err := os.ReadDir(poolDir)
+	if err != nil {
+		m.log.Warnf("Failed to read pool directory %s: %v", poolDir, err)
+		return
+	}
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		// Only check socket files
+		if filepath.Ext(file.Name()) != ".sock" {
+			continue
+		}
+
+		socketPath := filepath.Join(poolDir, file.Name())
+
+		// Try to connect to the socket to check if firecracker is still running
+		if m.isSocketActive(socketPath) {
+			m.log.Debugf("Socket %s is still active, skipping cleanup", socketPath)
+			continue
+		}
+
+		// Socket is stale, remove it and the corresponding log file
+		m.log.Infof("Removing stale socket: %s", socketPath)
+		if err := os.Remove(socketPath); err != nil {
+			m.log.Warnf("Failed to remove stale socket %s: %v", socketPath, err)
+		}
+
+		// Also remove corresponding log file
+		logPath := socketPath[:len(socketPath)-5] + ".log" // Replace .sock with .log
+		if _, err := os.Stat(logPath); err == nil {
+			m.log.Infof("Removing stale log: %s", logPath)
+			if err := os.Remove(logPath); err != nil {
+				m.log.Warnf("Failed to remove stale log %s: %v", logPath, err)
+			}
+		}
+	}
+}
+
+// isSocketActive checks if a socket file has an active firecracker process.
+func (m *Manager) isSocketActive(socketPath string) bool {
+	// Try to connect to the socket with a short timeout
+	conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
+	if err != nil {
+		// Connection failed - socket is stale
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // Close closes the manager and releases resources.

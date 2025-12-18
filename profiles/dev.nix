@@ -1,6 +1,11 @@
 # Development environment profile
 # Applied to hosts tagged with "dev"
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 {
   # Development-friendly fireactions settings
@@ -12,6 +17,8 @@
     # Add your public SSH key to secrets/secrets.yaml under debug_ssh_key
     registryCache.debug.sshKeyFile = config.sops.secrets."debug-ssh-key".path;
   };
+
+  services.fireteact.logLevel = "debug";
 
   # More permissive SSH for development
   services.openssh.settings = {

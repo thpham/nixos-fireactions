@@ -30,15 +30,23 @@ type RegistrationToken struct {
 	Token string `json:"token"`
 }
 
+// RunnerLabel represents a label attached to a runner in Gitea.
+type RunnerLabel struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 // Runner represents a registered runner in Gitea.
 type Runner struct {
-	ID          int64    `json:"id"`
-	Name        string   `json:"name"`
-	Status      string   `json:"status"`
-	Busy        bool     `json:"busy"`
-	Labels      []string `json:"labels"`
-	Version     string   `json:"version"`
-	LastContact string   `json:"last_contact,omitempty"`
+	ID          int64         `json:"id"`
+	Name        string        `json:"name"`
+	Status      string        `json:"status"`
+	Busy        bool          `json:"busy"`
+	Ephemeral   bool          `json:"ephemeral"`
+	Labels      []RunnerLabel `json:"labels"`
+	Version     string        `json:"version,omitempty"`
+	LastContact string        `json:"last_contact,omitempty"`
 }
 
 // Job represents a Gitea Actions job.
@@ -153,6 +161,12 @@ func (c *Client) DeleteRunner(ctx context.Context, runnerID int64) error {
 	return nil
 }
 
+// runnersResponse wraps the Gitea API response which contains runners and pagination info.
+type runnersResponse struct {
+	Runners    []Runner `json:"runners"`
+	TotalCount int      `json:"total_count"`
+}
+
 // ListRunners returns all runners registered with Gitea.
 func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
 	endpoint := c.getRunnersListEndpoint()
@@ -182,17 +196,80 @@ func (c *Client) ListRunners(ctx context.Context) ([]Runner, error) {
 		return nil, fmt.Errorf("failed to list runners: status %d, body: %s", resp.StatusCode, string(body))
 	}
 
+	// Log raw response for debugging
+	c.log.WithField("response_body", string(body)).Debug("Raw Gitea runners response")
+
+	// Try parsing as direct array first (older Gitea versions)
 	var runners []Runner
-	if err := json.Unmarshal(body, &runners); err != nil {
-		return nil, fmt.Errorf("failed to parse runners response: %w", err)
+	if err := json.Unmarshal(body, &runners); err == nil {
+		c.log.WithField("runner_count", len(runners)).Debug("Parsed as direct array")
+		return runners, nil
 	}
 
-	return runners, nil
+	// Try parsing as wrapped response (newer Gitea versions with pagination)
+	var wrappedResponse runnersResponse
+	if err := json.Unmarshal(body, &wrappedResponse); err != nil {
+		c.log.WithField("response_body", string(body)).Error("Failed to parse runners response")
+		return nil, fmt.Errorf("failed to parse runners response: %w (body: %.200s)", err, string(body))
+	}
+
+	c.log.WithField("runner_count", len(wrappedResponse.Runners)).Debug("Parsed as wrapped response")
+	return wrappedResponse.Runners, nil
 }
 
 // GetInstanceURL returns the Gitea instance URL.
 func (c *Client) GetInstanceURL() string {
 	return c.instanceURL
+}
+
+// DeleteRunnerByName finds and deletes a runner by its name.
+// This is useful during graceful shutdown when we only have the runner name.
+// Returns nil if the runner is not found (already deleted/never registered).
+func (c *Client) DeleteRunnerByName(ctx context.Context, name string) error {
+	runners, err := c.ListRunners(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list runners: %w", err)
+	}
+
+	c.log.WithFields(logrus.Fields{
+		"target_name":  name,
+		"runner_count": len(runners),
+	}).Info("Searching for runner to delete")
+
+	for _, runner := range runners {
+		c.log.WithFields(logrus.Fields{
+			"gitea_name": runner.Name,
+			"target":     name,
+			"runner_id":  runner.ID,
+		}).Debug("Comparing runner names")
+
+		if runner.Name == name {
+			c.log.WithFields(logrus.Fields{
+				"runner_name": name,
+				"runner_id":   runner.ID,
+			}).Info("Found runner, deleting from Gitea")
+			if err := c.DeleteRunner(ctx, runner.ID); err != nil {
+				return err
+			}
+			c.log.WithFields(logrus.Fields{
+				"runner_name": name,
+				"runner_id":   runner.ID,
+			}).Info("Successfully deleted runner from Gitea")
+			return nil
+		}
+	}
+
+	// Runner not found - log the names we did find for debugging
+	var foundNames []string
+	for _, r := range runners {
+		foundNames = append(foundNames, r.Name)
+	}
+	c.log.WithFields(logrus.Fields{
+		"target_name":  name,
+		"found_names":  foundNames,
+		"runner_count": len(runners),
+	}).Warn("Runner not found in Gitea runner list")
+	return nil
 }
 
 // GetPendingJobs retrieves pending jobs that match the given labels.
