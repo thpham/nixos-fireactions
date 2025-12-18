@@ -145,6 +145,7 @@ jobs:
           target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
           push: true
+          pull: true # Always pull fresh base images (fireteact:latest, fireactions, ubuntu)
           outputs: type=image,name=${{ steps.vars.outputs.image_name }},push-by-digest=true,name-canonical=true
           cache-from: type=gha,scope=${{ matrix.target }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}-${{ matrix.arch }}

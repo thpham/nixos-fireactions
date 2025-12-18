@@ -24,13 +24,19 @@ Initial release with new versioning scheme.
 
 ### [0.2.13-1] - Unreleased
 
-Initial release with new versioning scheme.
+Ephemeral runner mode for proper VM recycling.
+
+#### Changes
+
+- **Ephemeral runners**: Runners now auto-deregister from Gitea after completing one job
+- **Immediate VM recycling**: New VMs spawn immediately after job completion (no 10s delay)
+- **Improved logging**: Structured logging for runner lifecycle events
 
 #### Components
 
 | Component  | Version   |
 | ---------- | --------- |
 | Ubuntu     | 24.04 LTS |
-| act_runner | 0.2.11    |
+| act_runner | 0.2.13    |
 | fireteact  | latest    |
 | Docker CE  | latest    |
