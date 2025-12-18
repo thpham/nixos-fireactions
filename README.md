@@ -1,10 +1,10 @@
 # nixos-fireactions
 
-NixOS images for self-hosted GitHub Actions runners using [fireactions](https://fireactions.io) and Firecracker microVMs.
+NixOS module for self-hosted CI runners using Firecracker microVMs. Supports both GitHub Actions (via [fireactions](https://fireactions.io)) and Gitea Actions (via fireteact).
 
 ## Status
 
-**Phase 1: Foundation** - Core flake structure with working NixOS module.
+**Phase 3: Runtime** - Core infrastructure complete with registry caching and multi-provider runner support.
 
 ## Quick Start
 
@@ -314,6 +314,70 @@ nix build .#image-qcow2-cross
 nix build .#image-azure-cross
 ```
 
+## Registry Cache
+
+Optional pull-through cache for container registries using Zot and Squid. Reduces bandwidth, speeds up image pulls, and provides resilience against registry outages.
+
+### Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Firecracker VM │────▶│   Zot (OCI)     │────▶│  Docker Hub     │
+│  (containerd)   │     │   + Squid       │     │  ghcr.io, etc.  │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+### Enable Registry Cache
+
+```nix
+services.fireactions.registryCache = {
+  enable = true;
+  mirrors = {
+    "docker.io" = {};
+    "ghcr.io" = {};
+  };
+};
+```
+
+### Features
+
+- **Zot**: OCI-native pull-through cache for container images
+- **Squid**: HTTP/HTTPS caching proxy for non-OCI traffic
+- **Automatic VM configuration**: containerd, Docker, and BuildKit are auto-configured via cloud-init
+- **SSL bump** (optional): Intercept HTTPS for deeper caching
+
+## Gitea Actions Support (Fireteact)
+
+The `fireteact` module provides Gitea Actions runner support using the same Firecracker microVM infrastructure.
+
+### Enable Fireteact
+
+```nix
+services.fireteact = {
+  enable = true;
+  gitea = {
+    instanceUrl = "https://gitea.example.com";
+    runnerTokenFile = "/run/secrets/gitea-runner-token";
+  };
+  pools = [{
+    name = "default";
+    maxRunners = 5;
+    runner = {
+      labels = [ "ubuntu-24.04" ];
+    };
+  }];
+};
+```
+
+### Differences from Fireactions
+
+| Feature        | Fireactions (GitHub) | Fireteact (Gitea)         |
+| -------------- | -------------------- | ------------------------- |
+| Auth           | GitHub App           | Runner registration token |
+| Runner binary  | actions/runner       | act_runner                |
+| Image format   | Same OCI images      | Same OCI images           |
+| Registry cache | Supported            | Supported                 |
+
 ## Project Structure
 
 ```
@@ -321,11 +385,14 @@ nixos-fireactions/
 ├── flake.nix                    # Flake definition
 ├── flake.lock                   # Lock file
 ├── modules/
-│   └── fireactions/             # NixOS module
+│   ├── fireactions/             # GitHub Actions runner module
+│   │   ├── default.nix          # Entry point + options
+│   │   ├── services.nix         # systemd services
+│   │   ├── registry-cache.nix   # Zot/Squid caching
+│   │   └── security/            # Security hardening
+│   └── fireteact/               # Gitea Actions runner module
 │       ├── default.nix          # Entry point + options
-│       ├── services.nix         # systemd services
-│       ├── registry-cache.nix   # Zot/Squid caching
-│       └── security/            # Security hardening
+│       └── services.nix         # systemd services
 ├── pkgs/
 │   ├── fireactions.nix                  # Main binary
 │   ├── firecracker-kernel.nix           # Upstream guest kernel (minimal)
@@ -363,13 +430,14 @@ nixos-fireactions/
 
 - [x] **Phase 1**: Foundation (flake, module, packages)
 - [x] **Phase 2**: Image builders & Deployment (nixos-anywhere, Azure, DO)
-- [ ] **Phase 3**: Runtime components (registry, networking)
+- [x] **Phase 3**: Runtime components (registry cache, networking, Gitea support)
 - [ ] **Phase 4**: CI & Testing
 
 ## References
 
 - [fireactions documentation](https://fireactions.io)
 - [Firecracker](https://github.com/firecracker-microvm/firecracker)
+- [Gitea act_runner](https://gitea.com/gitea/act_runner)
 - [microvm.nix](https://github.com/astro/microvm.nix)
 
 ## License
