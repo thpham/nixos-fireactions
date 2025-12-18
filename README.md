@@ -1,18 +1,72 @@
 # nixos-fireactions
 
-NixOS module for self-hosted CI runners using Firecracker microVMs. Supports both GitHub Actions (via [fireactions](https://fireactions.io)) and Gitea Actions (via fireteact).
+Self-hosted CI runners using Firecracker microVMs. Run GitHub Actions and Gitea Actions workflows in lightweight, isolated VMs with auto-scaling and declarative NixOS configuration.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Your Server (NixOS)                                            │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  fireactions orchestrator                                │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐               │   │
+│  │  │ microVM  │  │ microVM  │  │ microVM  │ ← Ephemeral   │   │
+│  │  │ Runner 1 │  │ Runner 2 │  │ Runner N │   (per-job)   │   │
+│  │  └──────────┘  └──────────┘  └──────────┘               │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                           ▼
+        ┌───────────┐               ┌───────────┐
+        │  GitHub   │               │   Gitea   │
+        │  Actions  │               │  Actions  │
+        └───────────┘               └───────────┘
+```
+
+## Why nixos-fireactions?
+
+| Feature | Traditional Runners | nixos-fireactions |
+|---------|---------------------|-------------------|
+| Isolation | Container/None | KVM microVM |
+| Security | Shared kernel | Hardware-level |
+| Boot time | N/A | ~1-2 seconds |
+| Density | 1-5 per host | 10+ per host |
+| Configuration | Scripts/YAML | Declarative Nix |
+| Reproducibility | Low | High |
 
 ## Status
 
 **Phase 3: Runtime** - Core infrastructure complete with registry caching and multi-provider runner support.
 
-## Quick Start
+---
+
+## Get Started
+
+### New to nixos-fireactions?
+
+**[Read the Getting Started Guide](docs/GETTING_STARTED.md)** - Step-by-step walkthrough from zero to working runners in ~30 minutes.
+
+### Check Your Environment
+
+```bash
+# Verify prerequisites before deploying
+./scripts/check-prerequisites.sh
+
+# Also check your target server
+./scripts/check-prerequisites.sh --remote <your-server-ip>
+```
 
 ### Prerequisites
 
-- NixOS 25.11+ (kernel 6.1+ for Firecracker compatibility)
-- KVM-capable hardware
-- GitHub App configured for fireactions
+| Requirement | Details |
+|-------------|---------|
+| **Server** | KVM-capable, 2GB+ RAM |
+| **OS** | NixOS 25.11+ (kernel 6.1+) |
+| **Auth** | GitHub App or Gitea token |
+| **Local** | Nix with flakes enabled |
+
+---
+
+## Quick Start
 
 ### Using the Module
 
@@ -412,7 +466,8 @@ nixos-fireactions/
 │   ├── registry.json            # Auto-populated host registry
 │   └── <name>.nix               # Per-host config (escape hatch)
 ├── secrets/
-│   └── .sops.yaml               # sops-nix configuration
+│   ├── .sops.yaml               # sops-nix configuration
+│   └── secrets.yaml.example     # Secrets template
 ├── deploy/
 │   ├── deploy.sh                # Deployment + registration script
 │   ├── base.nix                 # Shared config (boot, network, SSH) - used by Colmena
@@ -422,9 +477,25 @@ nixos-fireactions/
 ├── images/
 │   ├── qcow2.nix                # Generic QCOW2 cloud image
 │   └── azure.nix                # Azure VHD image
+├── scripts/
+│   └── check-prerequisites.sh   # Environment validation tool
+├── examples/
+│   ├── minimal-github/          # Minimal GitHub Actions setup
+│   └── README.md                # Examples index
 └── docs/
+    ├── GETTING_STARTED.md       # Step-by-step setup guide
     └── requirements.md          # Full requirements
 ```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Getting Started Guide](docs/GETTING_STARTED.md) | Step-by-step walkthrough for new users |
+| [Security Hardening](modules/fireactions/security/README.md) | VM isolation and security options |
+| [Fireteact (Gitea)](fireteact/README.md) | Gitea Actions runner documentation |
+| [Runner Images](images/docker/ubuntu-24.04/README.md) | Container image customization |
+| [Examples](examples/) | Complete configuration examples |
 
 ## Roadmap
 
@@ -432,6 +503,40 @@ nixos-fireactions/
 - [x] **Phase 2**: Image builders & Deployment (nixos-anywhere, Azure, DO)
 - [x] **Phase 3**: Runtime components (registry cache, networking, Gitea support)
 - [ ] **Phase 4**: CI & Testing
+
+## Quick Reference
+
+```bash
+# Check prerequisites
+./scripts/check-prerequisites.sh
+./scripts/check-prerequisites.sh --remote <ip>
+
+# Deploy new host
+./deploy/deploy.sh -p do -n runner-1 -t prod,github-runners,medium <ip>
+
+# List registered hosts
+./deploy/deploy.sh list
+
+# Update hosts with Colmena
+colmena apply --on runner-1 --build-on-target  # Single host
+colmena apply --on @prod --build-on-target      # By tag
+colmena apply --build-on-target                 # All hosts
+
+# Check service status
+ssh root@<ip> systemctl status fireactions
+
+# View logs
+ssh root@<ip> journalctl -u fireactions -f
+
+# Check metrics
+curl http://<ip>:8081/metrics
+```
+
+## Getting Help
+
+- **Documentation**: [Getting Started Guide](docs/GETTING_STARTED.md)
+- **Issues**: [GitHub Issues](https://github.com/thpham/nixos-fireactions/issues)
+- **Logs**: `journalctl -u fireactions -f` on the runner host
 
 ## References
 

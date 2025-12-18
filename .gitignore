@@ -5,8 +5,9 @@ result-*
 # direnv
 .direnv/
 
-# project
+# project - ignore generated docs but keep markdown
 docs/
+!docs/*.md
 
 # Editor files
 *.swp
