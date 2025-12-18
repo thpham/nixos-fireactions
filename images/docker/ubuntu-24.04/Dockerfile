@@ -129,7 +129,7 @@ RUN systemctl enable cloud-init-local.service \
 
 FROM base AS github-runner
 
-ARG RUNNER_VERSION="2.322.0"
+ARG RUNNER_VERSION="2.330.0"
 ARG TARGETARCH
 
 # Set root password for debug access

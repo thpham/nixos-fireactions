@@ -2,11 +2,11 @@
 
 All notable changes to the Ubuntu 24.04 runner images will be documented in this file.
 
-Versioning format: `{runner_version}-{increment}` (e.g., `2.322.0-1` for GitHub, `0.2.13-1` for Gitea)
+Versioning format: `{runner_version}-{increment}` (e.g., `2.330.0-1` for GitHub, `0.2.13-1` for Gitea)
 
 ## GitHub Runner
 
-### [2.322.0-1] - Unreleased
+### [2.330.0-1] - Unreleased
 
 Initial release with new versioning scheme.
 
@@ -15,7 +15,7 @@ Initial release with new versioning scheme.
 | Component             | Version   |
 | --------------------- | --------- |
 | Ubuntu                | 24.04 LTS |
-| GitHub Actions Runner | 2.322.0   |
+| GitHub Actions Runner | 2.330.0   |
 | fireactions           | 0.4.0     |
 | Docker CE             | latest    |
 | GitHub CLI            | latest    |
