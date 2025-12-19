@@ -64,6 +64,7 @@ in
     # Open firewall for DNS and DHCP on all bridges
     networking.firewall.interfaces = lib.listToAttrs (map (b:
       lib.nameValuePair b.bridgeName {
+        allowedTCPPorts = [ 53 ]; # DNS (TCP for large responses)
         allowedUDPPorts = [ 53 67 ]; # DNS + DHCP
       }
     ) bridgeConfigs);

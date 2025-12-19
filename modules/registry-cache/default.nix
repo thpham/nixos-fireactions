@@ -109,13 +109,15 @@ let
     # ========================================
     # NETWORK CONFIGURATION
     # ========================================
-    http_port ${primaryGateway}:3128 intercept
+    # Listen on all bridge gateways (one http_port per bridge)
+    ${lib.concatMapStringsSep "\n    " (net: "http_port ${net.gateway}:3128 intercept") parsedNetworks}
     ${lib.optionalString (cfg.squid.sslBump.mode != "off") ''
-      https_port ${primaryGateway}:3129 intercept ssl-bump \
+      # HTTPS ports for all bridges
+      ${lib.concatMapStringsSep "\n      " (net: ''https_port ${net.gateway}:3129 intercept ssl-bump \
         generate-host-certificates=on \
         dynamic_cert_mem_cache_size=512MB \
         cert=${caCertPath} \
-        key=${caKeyPath}
+        key=${caKeyPath}'') parsedNetworks}
     ''}
 
     # DNS servers
