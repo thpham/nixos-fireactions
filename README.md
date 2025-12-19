@@ -372,8 +372,7 @@ nixos-fireactions/
 │   │   └── nat.nix              # NAT rules for transparent proxy
 │   ├── fireactions/             # GitHub Actions runner module
 │   │   ├── default.nix          # Entry point + options
-│   │   ├── services.nix         # systemd services
-│   │   └── security/            # Security hardening
+│   │   └── services.nix         # systemd services + built-in security
 │   └── fireteact/               # Gitea Actions runner module
 │       ├── default.nix          # Entry point + options
 │       └── services.nix         # systemd services

@@ -2,8 +2,13 @@
 #
 # Module structure:
 # - default.nix (this file): Entry point, option definitions
-# - services.nix: systemd services and system configuration
-# - security/: Security hardening submodule (optional)
+# - services.nix: systemd services, system configuration, built-in security
+#
+# Security model:
+# - Firecracker's KVM-based VM isolation is the primary security boundary
+# - Network isolation (VM-to-VM blocking, metadata protection) is always enabled
+# - Systemd service hardening is always enabled
+# - Host-level security (sysctls, LUKS) is configured via microvm-base.security
 #
 # Dependencies:
 # - microvm-base: Shared infrastructure (bridges, containerd, DNSmasq)
@@ -131,9 +136,8 @@ in
   imports = [
     # Note: microvm-base and registry-cache are imported separately by hosts/default.nix
     # as foundation and caching layers respectively
-    # Fireactions-specific modules
+    # Fireactions service module (includes built-in security hardening)
     ./services.nix
-    ./security
   ];
 
   #

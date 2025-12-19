@@ -22,7 +22,8 @@ in
       enable = true;
 
       # Create bridge netdevs
-      netdevs = lib.mapAttrs' (name: bridge:
+      netdevs = lib.mapAttrs' (
+        name: bridge:
         lib.nameValuePair "10-${bridge.bridgeName}" {
           netdevConfig = {
             Name = bridge.bridgeName;
@@ -32,7 +33,8 @@ in
       ) cfg.bridges;
 
       # Configure bridge networks with gateway IPs
-      networks = lib.mapAttrs' (name: bridge:
+      networks = lib.mapAttrs' (
+        name: bridge:
         let
           info = cfg._internal.bridges.${name};
         in
@@ -50,7 +52,6 @@ in
     };
 
     # Trust all bridge interfaces in firewall
-    networking.firewall.trustedInterfaces =
-      lib.mapAttrsToList (_: b: b.bridgeName) cfg.bridges;
+    networking.firewall.trustedInterfaces = lib.mapAttrsToList (_: b: b.bridgeName) cfg.bridges;
   };
 }

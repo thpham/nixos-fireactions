@@ -4,6 +4,7 @@
 # - User/group configuration
 # - CNI configuration for fireactions
 # - systemd services (fireactions, kernel setup, config injection)
+# - Built-in security hardening (systemd isolation, network isolation)
 #
 # Delegated to microvm-base:
 # - Boot configuration (kernel modules, sysctl)
@@ -12,9 +13,16 @@
 # - DNSmasq configuration
 # - NAT configuration
 # - CNI plugins setup
+# - Storage security (LUKS, tmpfs secrets, snapshot cleanup)
 #
 # Delegated to registry-cache (standalone module):
 # - Zot/Squid caching services
+#
+# Security model:
+# - Firecracker's KVM-based VM isolation is the primary security boundary
+# - Network isolation (VM-to-VM blocking, metadata protection) is always enabled
+# - Systemd service hardening is always enabled
+# - Host-level security (sysctls, LUKS) is in microvm-base.security
 
 {
   config,
@@ -58,6 +66,37 @@ let
   };
 
   cniConfigFile = pkgs.writeText "fireactions.conflist" (builtins.toJSON cniConfig);
+
+  #
+  # Network isolation configuration (always enabled)
+  #
+
+  # Calculate gateway IP from subnet (e.g., 10.200.0.0/24 -> 10.200.0.1)
+  subnetParts = lib.splitString "/" cfg.networking.subnet;
+  networkAddr = builtins.head subnetParts;
+  networkOctets = lib.splitString "." networkAddr;
+  gatewayIp = lib.concatStringsSep "." (lib.take 3 networkOctets ++ [ "1" ]);
+
+  # Network isolation settings (hardcoded for security - not configurable)
+  networkIsolation = {
+    blockVmToVm = true;
+    blockCloudMetadata = true;
+    rateLimitConnections = 100;
+    allowedHostPorts = [
+      53 # DNS (dnsmasq)
+      67 # DHCP
+      3128 # Squid HTTP proxy
+      3129 # Squid HTTPS proxy (SSL bump)
+      5000 # Zot registry cache
+    ];
+    allowedHostUdpPorts = [
+      53 # DNS
+      67 # DHCP
+    ];
+  };
+
+  # Format port list for nftables
+  formatPorts = ports: lib.concatMapStringsSep ", " toString ports;
 
   # Generate fireactions config from NixOS options (upstream YAML format)
   fireactionsConfig = {
@@ -410,7 +449,11 @@ in
           # Working directory
           WorkingDirectory = cfg.dataDir;
 
-          # Security hardening
+          #
+          # Security hardening (built-in, always enabled)
+          #
+
+          # Basic isolation
           NoNewPrivileges = false; # Needs privileges for network setup
           ProtectSystem = "strict";
           ProtectHome = true;
@@ -424,6 +467,53 @@ in
             "/run/netns" # Symlink target
             "/var/lib/cni" # CNI plugin cache directory
           ];
+
+          # System call filtering - allow only necessary syscall groups
+          SystemCallFilter = [
+            "@system-service"
+            "@mount"
+            "@network-io"
+            "@privileged"
+            "~@obsolete"
+          ];
+          SystemCallArchitectures = "native";
+
+          # Memory protection
+          MemoryDenyWriteExecute = true;
+
+          # Personality restrictions
+          LockPersonality = true;
+
+          # Restrict address families to required ones
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+            "AF_NETLINK"
+          ];
+
+          # Restrict namespace creation (except network for VMs)
+          RestrictNamespaces = "~user pid ipc";
+
+          # Protect clock and kernel resources
+          ProtectClock = true;
+          ProtectKernelLogs = true;
+          ProtectKernelModules = true;
+          ProtectKernelTunables = true;
+          ProtectControlGroups = true;
+          ProtectProc = "invisible";
+
+          # Restrict realtime scheduling
+          RestrictRealtime = true;
+
+          # Restrict SUID/SGID execution
+          RestrictSUIDSGID = true;
+
+          # Private /dev with only needed devices
+          PrivateDevices = false; # Need /dev/kvm access
+
+          # Remove all capabilities not explicitly needed
+          SecureBits = "noroot-locked";
 
           # Capabilities for Firecracker networking
           AmbientCapabilities = [
@@ -451,6 +541,99 @@ in
       allowedTCPPorts = lib.mkIf cfg.metricsEnable [
         (lib.toInt (lib.last (lib.splitString ":" cfg.metricsAddress)))
       ];
+    };
+
+    #
+    # Network Isolation (Built-in, always enabled)
+    #
+    # Implements strict network segmentation for multi-tenant security:
+    # - Block VM-to-VM communication (prevent lateral movement)
+    # - Block access to cloud metadata service (169.254.169.254)
+    # - Rate limit outbound connections (prevent abuse)
+    # - Allow only specific gateway services (DNS, DHCP, proxy)
+    #
+
+    # Enable nftables for network isolation
+    networking.nftables.enable = true;
+
+    # nftables ruleset for VM isolation
+    networking.nftables.tables.fireactions_isolation = {
+      family = "inet";
+      content = ''
+        # Chain for forwarded traffic (VM to external, VM to VM)
+        chain forward {
+          type filter hook forward priority filter; policy accept;
+
+          # Always allow established/related connections
+          ct state established,related accept
+
+          # CRITICAL: Block VM-to-VM communication on bridge
+          # This prevents lateral movement between GitHub Actions jobs
+          iifname "${cfg.networking.bridgeName}" oifname "${cfg.networking.bridgeName}" \
+            counter drop comment "Block VM-to-VM traffic"
+
+          # Block access to cloud metadata services
+          # Azure IMDS, AWS IMDS, GCP metadata all use this IP
+          iifname "${cfg.networking.bridgeName}" ip daddr 169.254.169.254 \
+            counter drop comment "Block cloud metadata access"
+
+          # Also block the link-local range used by some cloud metadata
+          iifname "${cfg.networking.bridgeName}" ip daddr 169.254.0.0/16 \
+            counter drop comment "Block link-local metadata"
+
+          # Rate limit new outbound connections from VMs
+          iifname "${cfg.networking.bridgeName}" ct state new \
+            limit rate over ${toString networkIsolation.rateLimitConnections}/second burst 50 packets \
+            counter drop comment "Rate limit new connections"
+
+          # Allow VMs to reach external networks (via NAT)
+          iifname "${cfg.networking.bridgeName}" oifname != "${cfg.networking.bridgeName}" accept
+        }
+
+        # Chain for traffic to the host (gateway services)
+        chain input {
+          type filter hook input priority filter; policy accept;
+
+          # Always allow established/related
+          ct state established,related accept
+
+          # Allow loopback
+          iif lo accept
+
+          # Allow VMs to access specific TCP services on gateway
+          iifname "${cfg.networking.bridgeName}" ip daddr ${gatewayIp} \
+            tcp dport { ${formatPorts networkIsolation.allowedHostPorts} } accept
+
+          # Allow VMs to access specific UDP services on gateway
+          iifname "${cfg.networking.bridgeName}" ip daddr ${gatewayIp} \
+            udp dport { ${formatPorts networkIsolation.allowedHostUdpPorts} } accept
+
+          # Allow DHCP broadcast (client sends to 255.255.255.255:67)
+          iifname "${cfg.networking.bridgeName}" ip daddr 255.255.255.255 udp dport 67 accept
+
+          # Block VMs from accessing other host services
+          iifname "${cfg.networking.bridgeName}" ip daddr ${gatewayIp} \
+            counter drop comment "Block unauthorized gateway access"
+
+          # Block VMs from accessing host's external IP
+          # (they should only communicate via gateway IP on bridge)
+          # Exceptions:
+          # - 169.254.0.0/16: Firecracker MMDS (metadata service)
+          # - 255.255.255.255: DHCP broadcast
+          iifname "${cfg.networking.bridgeName}" \
+            ip daddr != ${gatewayIp} \
+            ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 255.255.255.255 } \
+            counter drop comment "Block VM to host external IP"
+        }
+      '';
+    };
+
+    # Kernel modules and sysctls for bridge traffic filtering
+    boot.kernelModules = [ "br_netfilter" ];
+    boot.kernel.sysctl = {
+      # Let nftables handle bridge traffic at L3
+      "net.bridge.bridge-nf-call-iptables" = lib.mkDefault 1;
+      "net.bridge.bridge-nf-call-ip6tables" = lib.mkDefault 1;
     };
   };
 }

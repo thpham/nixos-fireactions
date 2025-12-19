@@ -49,12 +49,11 @@ in
 
   config = lib.mkIf (baseCfg.enable && cfg.enable) {
     # Warnings for security considerations
-    warnings =
-      lib.optional (!cfg.hardening.disableHyperthreading) ''
-        microvm-base: Hyperthreading (SMT) is enabled. For maximum security
-        against Spectre-class attacks on shared infrastructure, consider:
-          services.microvm-base.security.hardening.disableHyperthreading = true
-        Note: This reduces vCPU count by 50%.
-      '';
+    warnings = lib.optional (!cfg.hardening.disableHyperthreading) ''
+      microvm-base: Hyperthreading (SMT) is enabled. For maximum security
+      against Spectre-class attacks on shared infrastructure, consider:
+        services.microvm-base.security.hardening.disableHyperthreading = true
+      Note: This reduces vCPU count by 50%.
+    '';
   };
 }

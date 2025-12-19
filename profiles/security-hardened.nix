@@ -1,25 +1,23 @@
 # Security-hardened profile for Firecracker runner infrastructure
 #
-# Enables comprehensive security hardening for all runner technologies:
-#
-# Shared security (microvm-base.security):
+# Enables host-level security hardening via microvm-base.security:
 # - Kernel sysctls and boot parameter hardening
-# - Storage security (LUKS encryption, secure deletion)
+# - Storage security (LUKS encryption, secure deletion, snapshot cleanup)
 # - Tmpfs for sensitive runtime data
 #
-# Fireactions-specific security (fireactions.security):
-# - Network isolation (VM-to-VM blocking, metadata protection)
-# - Systemd service hardening
-# - Secure snapshot cleanup
+# Runner-specific security (network isolation, systemd hardening) is now
+# built-in to each runner module and always enabled:
+# - fireactions: services.nix includes nftables rules and systemd hardening
+# - fireteact: (future) will include similar built-in security
 #
-# Note: Firecracker's KVM-based VM isolation is the primary security boundary.
+# Firecracker's KVM-based VM isolation is the primary security boundary.
 # The jailer was considered but removed due to NixOS incompatibility
 # (dynamic linking requires /nix/store access inside chroot).
 #
 # For maximum security, also consider:
 # - services.microvm-base.security.hardening.disableHyperthreading = true
 
-{ config, lib, ... }:
+{ ... }:
 
 {
   #
@@ -51,40 +49,7 @@
     };
   };
 
-  #
-  # Fireactions-specific security (only if fireactions is enabled)
-  #
-  services.fireactions.security = lib.mkIf config.services.fireactions.enable {
-    enable = true;
-
-    # Systemd service hardening (low risk, always enable)
-    hardening.systemdHardening.enable = true;
-
-    # Network isolation (medium risk, recommended)
-    network = {
-      enable = true;
-      blockVmToVm = true;
-      blockCloudMetadata = true;
-      rateLimitConnections = 100;
-      allowedHostPorts = [
-        53 # DNS
-        67 # DHCP
-        3128 # Squid HTTP proxy
-        3129 # Squid HTTPS proxy
-        5000 # Zot registry
-      ];
-    };
-
-    # Storage cleanup (fireactions-specific)
-    storage = {
-      enable = true;
-      secureDelete = {
-        enable = true;
-        method = "discard";
-      };
-    };
-  };
-
-  # Future: Fireteact-specific security when implemented
-  # services.fireteact.security = lib.mkIf config.services.fireteact.enable { ... };
+  # Note: Runner-specific security (network isolation, systemd hardening)
+  # is now built-in to each runner module and always enabled when the
+  # runner is enabled. No additional configuration needed here.
 }

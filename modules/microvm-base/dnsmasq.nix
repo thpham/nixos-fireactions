@@ -13,12 +13,20 @@ let
   cfg = config.services.microvm-base;
 
   # Generate DHCP configuration for each bridge
-  bridgeConfigs = lib.mapAttrsToList (name: bridge:
+  bridgeConfigs = lib.mapAttrsToList (
+    name: bridge:
     let
       info = cfg._internal.bridges.${name};
-    in {
+    in
+    {
       inherit name;
-      inherit (info) bridgeName gateway dhcpStart dhcpEnd netmask;
+      inherit (info)
+        bridgeName
+        gateway
+        dhcpStart
+        dhcpEnd
+        netmask
+        ;
     }
   ) cfg.bridges;
 
@@ -41,15 +49,15 @@ in
         log-queries = false;
 
         # DHCP ranges with tags for each bridge
-        dhcp-range = map (b:
-          "set:${b.name},${b.dhcpStart},${b.dhcpEnd},${b.netmask},12h"
-        ) bridgeConfigs;
+        dhcp-range = map (b: "set:${b.name},${b.dhcpStart},${b.dhcpEnd},${b.netmask},12h") bridgeConfigs;
 
         # Per-bridge gateway and DNS options
-        dhcp-option = lib.flatten (map (b: [
-          "tag:${b.name},3,${b.gateway}"  # Gateway
-          "tag:${b.name},6,${b.gateway}"  # DNS server
-        ]) bridgeConfigs);
+        dhcp-option = lib.flatten (
+          map (b: [
+            "tag:${b.name},3,${b.gateway}" # Gateway
+            "tag:${b.name},6,${b.gateway}" # DNS server
+          ]) bridgeConfigs
+        );
 
         dhcp-rapid-commit = true;
       };
@@ -62,11 +70,17 @@ in
     };
 
     # Open firewall for DNS and DHCP on all bridges
-    networking.firewall.interfaces = lib.listToAttrs (map (b:
-      lib.nameValuePair b.bridgeName {
-        allowedTCPPorts = [ 53 ]; # DNS (TCP for large responses)
-        allowedUDPPorts = [ 53 67 ]; # DNS + DHCP
-      }
-    ) bridgeConfigs);
+    networking.firewall.interfaces = lib.listToAttrs (
+      map (
+        b:
+        lib.nameValuePair b.bridgeName {
+          allowedTCPPorts = [ 53 ]; # DNS (TCP for large responses)
+          allowedUDPPorts = [
+            53
+            67
+          ]; # DNS + DHCP
+        }
+      ) bridgeConfigs
+    );
   };
 }

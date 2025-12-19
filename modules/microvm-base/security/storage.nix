@@ -20,6 +20,9 @@ let
   cfg = config.services.microvm-base.security;
   storageCfg = cfg.storage;
   baseCfg = config.services.microvm-base;
+
+  # Pool name for devmapper - must match containerd config in ../containerd.nix
+  poolName = "containerd-pool";
 in
 {
   options.services.microvm-base.security.storage = {
@@ -284,5 +287,66 @@ in
         {
           discard_blocks = true;
         };
+
+    #
+    # Secure snapshot cleanup service (shared across all runner technologies)
+    #
+    systemd.services.microvm-snapshot-cleanup = lib.mkIf storageCfg.secureDelete.enable {
+      description = "Securely cleanup microVM thin-provisioned snapshots";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "containerd.service" ];
+
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+
+      path = [
+        pkgs.util-linux
+        pkgs.lvm2
+        pkgs.coreutils
+      ];
+
+      # Cleanup on stop (shutdown)
+      preStop = ''
+        echo "Performing secure snapshot cleanup for ${poolName}..."
+
+        # Find all snapshot devices for this pool
+        for device in /dev/mapper/${poolName}-snap-*; do
+          if [ -b "$device" ]; then
+            DEVICE_NAME=$(basename "$device")
+            echo "Cleaning snapshot: $DEVICE_NAME"
+
+            ${
+              if storageCfg.secureDelete.method == "discard" then
+                ''
+                  # Use blkdiscard for secure deletion on SSDs
+                  ${pkgs.util-linux}/bin/blkdiscard "$device" 2>/dev/null || true
+                ''
+              else
+                ''
+                  # Zero-fill for non-SSD storage
+                  dd if=/dev/zero of="$device" bs=1M status=none 2>/dev/null || true
+                ''
+            }
+          fi
+        done
+
+        echo "Secure snapshot cleanup completed"
+      '';
+
+      script = "true"; # No-op on start
+    };
+
+    # Timer for periodic cleanup of stale snapshots
+    systemd.timers.microvm-snapshot-cleanup = lib.mkIf storageCfg.secureDelete.enable {
+      description = "Periodic secure snapshot cleanup for microVMs";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "10m";
+        OnUnitActiveSec = "30m";
+        RandomizedDelaySec = "5m";
+      };
+    };
   };
 }

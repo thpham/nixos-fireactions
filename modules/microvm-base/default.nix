@@ -70,14 +70,16 @@ let
   };
 
   # Helper to parse subnet and extract network info
-  parseSubnet = subnet:
+  parseSubnet =
+    subnet:
     let
       parts = lib.splitString "/" subnet;
       networkAddr = lib.head parts;
       mask = lib.elemAt parts 1;
       octets = lib.splitString "." networkAddr;
       prefix = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}";
-    in {
+    in
+    {
       network = networkAddr;
       mask = mask;
       prefix = prefix;
@@ -192,8 +194,10 @@ in
         type = lib.types.attrsOf lib.types.attrs;
         internal = true;
         readOnly = true;
-        default = lib.mapAttrs (name: bridge:
-          parseSubnet bridge.subnet // {
+        default = lib.mapAttrs (
+          name: bridge:
+          parseSubnet bridge.subnet
+          // {
             inherit (bridge) bridgeName externalInterface;
           }
         ) cfg.bridges;

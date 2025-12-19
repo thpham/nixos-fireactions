@@ -113,11 +113,12 @@ let
     ${lib.concatMapStringsSep "\n    " (net: "http_port ${net.gateway}:3128 intercept") parsedNetworks}
     ${lib.optionalString (cfg.squid.sslBump.mode != "off") ''
       # HTTPS ports for all bridges
-      ${lib.concatMapStringsSep "\n      " (net: ''https_port ${net.gateway}:3129 intercept ssl-bump \
-        generate-host-certificates=on \
-        dynamic_cert_mem_cache_size=512MB \
-        cert=${caCertPath} \
-        key=${caKeyPath}'') parsedNetworks}
+      ${lib.concatMapStringsSep "\n      " (net: ''
+        https_port ${net.gateway}:3129 intercept ssl-bump \
+                generate-host-certificates=on \
+                dynamic_cert_mem_cache_size=512MB \
+                cert=${caCertPath} \
+                key=${caKeyPath}'') parsedNetworks}
     ''}
 
     # DNS servers

@@ -10,6 +10,7 @@ This module provides infrastructure-level security that benefits all runner tech
 - **CPU mitigations**: Optional SMT/Hyperthreading disable for Spectre protection
 - **Storage encryption**: LUKS encryption for containerd devmapper pool
 - **Secure secrets**: Tmpfs mount for sensitive runtime data
+- **Snapshot cleanup**: Secure deletion of devmapper snapshots on shutdown
 
 ## Module Structure
 
@@ -102,6 +103,15 @@ Provides data-at-rest protection for the containerd devmapper pool:
 | `storage.tmpfsSecrets.size`   | "64M"                       | Tmpfs size                         |
 | `storage.tmpfsSecrets.path`   | "/run/microvm-base/secrets" | Mount path                         |
 
+**Snapshot Cleanup:**
+
+When `secureDelete` is enabled, the module also provides:
+
+- `microvm-snapshot-cleanup.service`: Runs on shutdown to securely delete all `containerd-pool-snap-*` devices
+- `microvm-snapshot-cleanup.timer`: Periodic cleanup every 30 minutes
+
+This cleanup service handles all runner technologies (fireactions, fireteact, etc.) since they share the same containerd devmapper pool.
+
 ## Ephemeral Encryption Design
 
 The LUKS encryption uses **ephemeral keys** - a new random key is generated at each boot:
@@ -125,17 +135,25 @@ This design is intentional for Firecracker microVMs because:
 ┌────────────────────────────────────────────────────┐
 │              microvm-base.security                 │
 │  (this module - shared host-level security)        │
+├────────────────────────────────────────────────────┤
+│  - Kernel hardening (sysctls, SMT disable)         │
+│  - Storage encryption (LUKS, tmpfs secrets)        │
+│  - Snapshot cleanup (all runners share pool)       │
 └────────────────────────────────────────────────────┘
                         │
           ┌─────────────┴─────────────┐
           ▼                           ▼
 ┌──────────────────────┐    ┌──────────────────────┐
-│ fireactions.security │    │ fireteact (future)   │
+│ fireactions (built-in│    │ fireteact (built-in  │
+│ security in service) │    │ security in service) │
 │ - Network isolation  │    │ - Network isolation  │
 │ - Systemd hardening  │    │ - Systemd hardening  │
-│ - Snapshot cleanup   │    │ - Snapshot cleanup   │
 └──────────────────────┘    └──────────────────────┘
 ```
+
+**Note:** Runner-specific security (network isolation, systemd hardening) is
+built directly into each runner module and enabled automatically when the
+runner is enabled. No separate security configuration is needed.
 
 ## Verification
 
@@ -159,6 +177,19 @@ Check tmpfs secrets mount:
 ```bash
 mount | grep /run/microvm-base/secrets
 ls -la /run/microvm-base/secrets/
+```
+
+Check snapshot cleanup timer:
+
+```bash
+systemctl status microvm-snapshot-cleanup.timer
+systemctl list-timers microvm-snapshot-cleanup.timer
+```
+
+List current snapshots:
+
+```bash
+ls -la /dev/mapper/containerd-pool-snap-*
 ```
 
 ## Troubleshooting
