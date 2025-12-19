@@ -111,6 +111,11 @@ in
   };
 
   config = lib.mkIf (cfg.enable && storageCfg.enable) {
+    # Add cryptsetup to system packages when encryption is enabled (for verification)
+    environment.systemPackages = lib.mkIf storageCfg.encryption.enable [
+      pkgs.cryptsetup
+    ];
+
     # Tmpfs mount for sensitive data
     fileSystems.${storageCfg.tmpfsSecrets.path} = lib.mkIf storageCfg.tmpfsSecrets.enable {
       device = "tmpfs";
