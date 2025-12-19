@@ -1,6 +1,6 @@
 # nixos-fireactions
 
-NixOS module for self-hosted CI runners using Firecracker microVMs. Supports both GitHub Actions (via [fireactions](https://fireactions.io)) and Gitea Actions (via fireteact).
+NixOS module for self-hosted CI runners using Firecracker microVMs. Supports GitHub Actions (via [fireactions](https://fireactions.io)), Gitea Actions (via fireteact), and GitLab CI (via fireglab).
 
 ## Status
 
@@ -13,12 +13,12 @@ The module system uses a composable 4-layer architecture, allowing independent d
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Layer 4: Profiles                        │
-│  fireactions-small  fireteact-medium  registry-cache        │
+│  {runner}-{size}   registry-cache   prod/dev                │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│              Layer 3: Runner Technologies                   │
-│   fireactions/     fireteact/     (future: fireglab/)       │
+│              Layer 3: Runner Orchestrators                  │
+│   fireactions/     fireteact/     fireglab/                 │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -34,11 +34,12 @@ The module system uses a composable 4-layer architecture, allowing independent d
 
 ### Composable Deployments
 
-| Scenario                      | Tags                                                                          |
-| ----------------------------- | ----------------------------------------------------------------------------- |
-| Gitea only + cache            | `["gitea-runners", "fireteact-medium", "registry-cache"]`                     |
-| GitHub only                   | `["github-runners", "fireactions-large"]`                                     |
-| Both runners, different sizes | `["github-runners", "gitea-runners", "fireactions-small", "fireteact-large"]` |
+| Scenario       | Tags                                                                           |
+| -------------- | ------------------------------------------------------------------------------ |
+| GitHub only    | `["github-runners", "fireactions-large"]`                                      |
+| Gitea + cache  | `["gitea-runners", "fireteact-medium", "registry-cache"]`                      |
+| GitLab only    | `["gitlab-runners", "fireglab-medium"]`                                        |
+| Multi-platform | `["github-runners", "gitlab-runners", "fireactions-small", "fireglab-medium"]` |
 
 ## Quick Start
 
@@ -46,7 +47,10 @@ The module system uses a composable 4-layer architecture, allowing independent d
 
 - NixOS 25.11+ (kernel 6.1+ for Firecracker compatibility)
 - KVM-capable hardware
-- GitHub App configured for fireactions, or Gitea API token for fireteact
+- Platform-specific credentials:
+  - **GitHub**: GitHub App (app_id + private_key)
+  - **Gitea**: API Token with runner management scope
+  - **GitLab**: Personal Access Token with `create_runner` scope
 
 ### Using the Module
 
@@ -64,11 +68,12 @@ Add to your `flake.nix`:
     nixosConfigurations.my-runner = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
-        # Import all modules (microvm-base, registry-cache, fireactions, fireteact)
+        # Import all modules
         nixos-fireactions.nixosModules.microvm-base
         nixos-fireactions.nixosModules.registry-cache
-        nixos-fireactions.nixosModules.fireactions
-        nixos-fireactions.nixosModules.fireteact
+        nixos-fireactions.nixosModules.fireactions  # GitHub Actions
+        nixos-fireactions.nixosModules.fireteact    # Gitea Actions
+        nixos-fireactions.nixosModules.fireglab     # GitLab CI
         {
           # Example: GitHub Actions runners only
           services.fireactions = {
@@ -111,15 +116,17 @@ nix develop
 | ----------------------------- | --------------------------------------------------- |
 | `nixosModules.microvm-base`   | Foundation layer: bridges, containerd, DNSmasq, CNI |
 | `nixosModules.registry-cache` | Standalone caching: Zot OCI + Squid HTTP proxy      |
-| `nixosModules.fireactions`    | GitHub Actions runner manager                       |
-| `nixosModules.fireteact`      | Gitea Actions runner manager                        |
+| `nixosModules.fireactions`    | GitHub Actions runner orchestrator                  |
+| `nixosModules.fireteact`      | Gitea Actions runner orchestrator                   |
+| `nixosModules.fireglab`       | GitLab CI runner orchestrator                       |
 
 ## Packages
 
 | Package                     | Description                                         |
 | --------------------------- | --------------------------------------------------- |
-| `fireactions`               | Main fireactions binary (v0.4.0)                    |
+| `fireactions`               | GitHub Actions runner orchestrator (v0.4.0)         |
 | `fireteact`                 | Gitea Actions runner orchestrator                   |
+| `fireglab`                  | GitLab CI runner orchestrator                       |
 | `firecracker-kernel`        | Upstream Firecracker CI kernel (6.1.141, minimal)   |
 | `firecracker-kernel-custom` | Custom kernel with Docker bridge networking support |
 | `tc-redirect-tap`           | CNI plugin for Firecracker networking               |
@@ -218,43 +225,38 @@ colmena apply --build-on-target
 
 Configuration is applied via **tags** using a profile system. Tags specified during deployment automatically apply matching profiles.
 
-**Technology-Specific Profiles** (recommended):
+**Size Profiles** (per runner technology):
 
-| Profile              | Purpose                                  |
-| -------------------- | ---------------------------------------- |
-| `fireactions-small`  | GitHub runners: 2 max, 1GB/1vCPU per VM  |
-| `fireactions-medium` | GitHub runners: 5 max, 2GB/2vCPU per VM  |
-| `fireactions-large`  | GitHub runners: 10 max, 4GB/4vCPU per VM |
-| `fireteact-small`    | Gitea runners: 2 max, 1GB/1vCPU per VM   |
-| `fireteact-medium`   | Gitea runners: 5 max, 2GB/2vCPU per VM   |
-| `fireteact-large`    | Gitea runners: 10 max, 4GB/4vCPU per VM  |
+Each runner orchestrator has small/medium/large size profiles following the pattern `{runner}-{size}`:
+
+| Size   | Resources       | Max Runners | Available Profiles                                          |
+| ------ | --------------- | ----------- | ----------------------------------------------------------- |
+| small  | 1GB RAM, 1 vCPU | 2           | `fireactions-small`, `fireteact-small`, `fireglab-small`    |
+| medium | 2GB RAM, 2 vCPU | 5           | `fireactions-medium`, `fireteact-medium`, `fireglab-medium` |
+| large  | 4GB RAM, 4 vCPU | 10          | `fireactions-large`, `fireteact-large`, `fireglab-large`    |
 
 **Workload Profiles**:
 
-| Profile          | Purpose                                                 |
-| ---------------- | ------------------------------------------------------- |
-| `github-runners` | Enables fireactions service with GitHub App credentials |
-| `gitea-runners`  | Enables fireteact service with Gitea API credentials    |
-| `registry-cache` | Enables Zot/Squid caching layer                         |
+| Profile          | Purpose                                |
+| ---------------- | -------------------------------------- |
+| `github-runners` | Enables fireactions with GitHub App    |
+| `gitea-runners`  | Enables fireteact with Gitea API token |
+| `gitlab-runners` | Enables fireglab with GitLab PAT       |
+| `registry-cache` | Enables Zot/Squid caching layer        |
 
-**Environment Profiles**:
-
-| Profile | Purpose                                             |
-| ------- | --------------------------------------------------- |
-| `prod`  | Production settings (strict security, warn logging) |
-| `dev`   | Development settings (debug logging, extra tools)   |
+**Environment Profiles**: `prod` (strict security) | `dev` (debug logging)
 
 **Example deployment combinations**:
 
 ```bash
-# Gitea runners only with caching
-./deploy/deploy.sh -p do -n gitea-1 -t prod,gitea-runners,fireteact-medium,registry-cache <ip>
-
-# GitHub runners only, large size
+# GitHub runners only
 ./deploy/deploy.sh -p do -n github-1 -t prod,github-runners,fireactions-large <ip>
 
-# Both runners with different sizes
-./deploy/deploy.sh -p do -n mixed-1 -t prod,github-runners,gitea-runners,fireactions-small,fireteact-large <ip>
+# GitLab runners with caching
+./deploy/deploy.sh -p do -n gitlab-1 -t prod,gitlab-runners,fireglab-medium,registry-cache <ip>
+
+# Multi-platform runners
+./deploy/deploy.sh -p do -n multi-1 -t prod,github-runners,gitlab-runners,fireactions-small,fireglab-medium <ip>
 ```
 
 ## Secrets Management
@@ -263,13 +265,16 @@ This project uses [sops-nix](https://github.com/Mic92/sops-nix) for secrets mana
 
 ### Defined Secrets
 
-| Secret               | Path on Host                      | Description            |
-| -------------------- | --------------------------------- | ---------------------- |
-| `github-app-id`      | `/run/secrets/github-app-id`      | GitHub App ID          |
-| `github-app-key`     | `/run/secrets/github-app-key`     | GitHub App private key |
-| `gitea-api-token`    | `/run/secrets/gitea-api-token`    | Gitea API token        |
-| `gitea-instance-url` | `/run/secrets/gitea-instance-url` | Gitea instance URL     |
-| `gitea-runner-owner` | `/run/secrets/gitea-runner-owner` | Gitea runner owner/org |
+| Secret                | Path on Host                       | Platform |
+| --------------------- | ---------------------------------- | -------- |
+| `github-app-id`       | `/run/secrets/github-app-id`       | GitHub   |
+| `github-app-key`      | `/run/secrets/github-app-key`      | GitHub   |
+| `gitea-api-token`     | `/run/secrets/gitea-api-token`     | Gitea    |
+| `gitea-instance-url`  | `/run/secrets/gitea-instance-url`  | Gitea    |
+| `gitea-runner-owner`  | `/run/secrets/gitea-runner-owner`  | Gitea    |
+| `gitlab-access-token` | `/run/secrets/gitlab-access-token` | GitLab   |
+| `gitlab-instance-url` | `/run/secrets/gitlab-instance-url` | GitLab   |
+| `gitlab-group-id`     | `/run/secrets/gitlab-group-id`     | GitLab   |
 
 ## Registry Cache
 
@@ -314,109 +319,62 @@ services.registry-cache = {
 - **SSL bump** (optional): Intercept HTTPS for deeper caching
 - **Multi-network support**: Serves all registered bridges from microvm-base
 
-## Gitea Actions Support (Fireteact)
+## Runner Orchestrators
 
-The `fireteact` module provides Gitea Actions runner support using the same Firecracker microVM infrastructure.
+Three Go-based orchestrators manage ephemeral Firecracker microVMs for different CI platforms:
 
-### Enable Fireteact
+| Orchestrator | Platform       | Auth Method   | Runner Agent   | Network Bridge |
+| ------------ | -------------- | ------------- | -------------- | -------------- |
+| fireactions  | GitHub Actions | GitHub App    | actions/runner | fireactions0   |
+| fireteact    | Gitea Actions  | API Token     | act_runner     | fireteact0     |
+| fireglab     | GitLab CI      | PAT (glrt-\*) | gitlab-runner  | fireglab0      |
 
-```nix
-# Kernel configuration is now at microvm-base layer
-services.microvm-base.kernel.source = "custom";  # Includes Docker bridge networking
+Each orchestrator:
 
-services.fireteact = {
-  enable = true;
+- Registers its own bridge with `microvm-base`
+- Uses per-pool containerd namespaces for isolation
+- Supports the same pool configuration structure
+- Works with `registry-cache` for image caching
 
-  gitea = {
-    instanceUrlFile = config.sops.secrets."gitea-instance-url".path;
-    apiTokenFile = config.sops.secrets."gitea-api-token".path;
-    runnerScope = "org";  # "org", "repo", or "instance"
-    runnerOwnerFile = config.sops.secrets."gitea-runner-owner".path;
-  };
+See individual READMEs for detailed configuration:
 
-  pools = [{
-    name = "default";
-    maxRunners = 5;
-    runner = {
-      labels = [ "ubuntu-24.04" ];
-      image = "ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:latest";
-    };
-  }];
-};
-```
-
-### Differences from Fireactions
-
-| Feature        | Fireactions (GitHub) | Fireteact (Gitea) |
-| -------------- | -------------------- | ----------------- |
-| Auth           | GitHub App           | API Token         |
-| Runner binary  | actions/runner       | act_runner        |
-| Image format   | Same OCI images      | Same OCI images   |
-| Registry cache | Supported            | Supported         |
+- [fireteact/README.md](fireteact/README.md) - Gitea Actions
+- [fireglab/README.md](fireglab/README.md) - GitLab CI
 
 ## Project Structure
 
 ```
 nixos-fireactions/
 ├── flake.nix                    # Flake definition
-├── flake.lock                   # Lock file
 ├── modules/
-│   ├── microvm-base/            # Foundation layer
-│   │   ├── default.nix          # Bridge registry, shared infrastructure
-│   │   ├── containerd.nix       # containerd + devmapper setup
-│   │   ├── dnsmasq.nix          # Multi-bridge DHCP/DNS
-│   │   ├── bridge.nix           # systemd-networkd bridges
-│   │   └── cni.nix              # CNI plugins setup
-│   ├── registry-cache/          # Standalone caching
-│   │   ├── default.nix          # Entry point + options
-│   │   └── nat.nix              # NAT rules for transparent proxy
-│   ├── fireactions/             # GitHub Actions runner module
-│   │   ├── default.nix          # Entry point + options
-│   │   └── services.nix         # systemd services + built-in security
-│   └── fireteact/               # Gitea Actions runner module
-│       ├── default.nix          # Entry point + options
-│       └── services.nix         # systemd services
+│   ├── microvm-base/            # Layer 1: Foundation (bridges, containerd, DNS, CNI)
+│   ├── registry-cache/          # Layer 2: Standalone caching (Zot + Squid)
+│   ├── fireactions/             # Layer 3: GitHub Actions orchestrator
+│   ├── fireteact/               # Layer 3: Gitea Actions orchestrator
+│   └── fireglab/                # Layer 3: GitLab CI orchestrator
+├── fireactions/                 # Upstream fireactions (submodule/reference)
+├── fireteact/                   # Gitea runner orchestrator (Go)
+├── fireglab/                    # GitLab runner orchestrator (Go)
 ├── pkgs/
-│   ├── fireactions.nix                  # Main binary
-│   ├── fireteact.nix                    # Gitea runner orchestrator
-│   ├── firecracker-kernel.nix           # Upstream guest kernel (minimal)
-│   ├── firecracker-kernel-custom.nix    # Custom kernel with Docker support
-│   ├── firecracker-kernel-custom.config # Custom kernel config additions
-│   ├── tc-redirect-tap.nix              # CNI plugin
-│   └── zot.nix                          # OCI registry
-├── profiles/                    # Tag-based configuration profiles
-│   ├── default.nix              # Profile index
-│   ├── sizes/                   # Size definitions
-│   │   └── _lib.nix             # Pool factory functions
-│   ├── fireactions-small.nix    # GitHub runners - small
-│   ├── fireactions-medium.nix   # GitHub runners - medium
-│   ├── fireactions-large.nix    # GitHub runners - large
-│   ├── fireteact-small.nix      # Gitea runners - small
-│   ├── fireteact-medium.nix     # Gitea runners - medium
-│   ├── fireteact-large.nix      # Gitea runners - large
-│   ├── github-runners.nix       # Enables fireactions + credentials
-│   ├── gitea-runners.nix        # Enables fireteact + credentials
-│   ├── registry-cache.nix       # Enables caching layer
-│   ├── prod.nix                 # Production environment
-│   └── dev.nix                  # Development environment
+│   ├── fireactions.nix          # GitHub orchestrator package
+│   ├── fireteact.nix            # Gitea orchestrator package
+│   ├── fireglab.nix             # GitLab orchestrator package
+│   ├── firecracker-kernel*.nix  # Guest kernels (upstream + custom)
+│   ├── tc-redirect-tap.nix      # CNI plugin
+│   └── zot.nix                  # OCI registry
+├── profiles/
+│   ├── sizes/_lib.nix           # Pool factory functions (mkFireactionsPool, etc.)
+│   ├── {runner}-{size}.nix      # Size profiles (9 total: 3 runners × 3 sizes)
+│   ├── {platform}-runners.nix   # Workload profiles (github, gitea, gitlab)
+│   ├── registry-cache.nix       # Caching layer
+│   └── prod.nix, dev.nix        # Environment profiles
 ├── hosts/
 │   ├── default.nix              # Colmena hive generator
-│   ├── registry.json            # Auto-populated host registry
-│   └── <name>.nix               # Per-host config (escape hatch)
-├── secrets/
-│   └── .sops.yaml               # sops-nix configuration
-├── deploy/
-│   ├── deploy.sh                # Deployment + registration script
-│   ├── base.nix                 # Shared config (boot, network, SSH)
-│   ├── configuration.nix        # Initial deploy config
-│   ├── disko.nix                # Disk partitioning
-│   └── digitalocean.nix         # DigitalOcean cloud-init config
-├── images/
-│   ├── qcow2.nix                # Generic QCOW2 cloud image
-│   └── azure.nix                # Azure VHD image
-└── docs/
-    ├── CLAUDE.md                # Development guidance
-    └── requirements.md          # Full requirements
+│   └── registry.json            # Auto-populated host registry
+├── deploy/                      # nixos-anywhere deployment
+├── images/                      # Cloud image builders (QCOW2, Azure)
+├── secrets/                     # sops-nix encrypted secrets
+└── docs/                        # Documentation
 ```
 
 ## Roadmap
@@ -432,6 +390,8 @@ nixos-fireactions/
 - [fireactions documentation](https://fireactions.io)
 - [Firecracker](https://github.com/firecracker-microvm/firecracker)
 - [Gitea act_runner](https://gitea.com/gitea/act_runner)
+- [GitLab Runner](https://docs.gitlab.com/runner/)
+- [GitLab Runners API](https://docs.gitlab.com/ee/api/users.html#create-a-runner)
 - [microvm.nix](https://github.com/astro/microvm.nix)
 
 ## License

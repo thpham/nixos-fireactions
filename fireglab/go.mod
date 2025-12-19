@@ -1,4 +1,4 @@
-module github.com/thpham/fireteact
+module github.com/thpham/fireglab
 
 go 1.24.0
 

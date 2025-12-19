@@ -12,16 +12,18 @@ on:
       target:
         description: "Build target"
         required: true
-        default: "both"
+        default: "all"
         type: choice
         options:
           - github-runner
           - gitea-runner
-          - both
+          - gitlab-runner
+          - all
   push:
     tags:
       - "ubuntu-24.04-github/*" # Matches: ubuntu-24.04-github/2.322.0-1
       - "ubuntu-24.04-gitea/*" # Matches: ubuntu-24.04-gitea/0.2.11-1
+      - "ubuntu-24.04-gitlab/*" # Matches: ubuntu-24.04-gitlab/18.7.0-1
     branches:
       - main
     paths:
@@ -32,7 +34,7 @@ env:
   IMAGE_BASE: ${{ github.repository_owner }}/fireactions-images
 
 jobs:
-  # Determine what to build based on trigger
+  # Determine what to build based on trigger and changed paths
   prepare:
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
@@ -40,6 +42,27 @@ jobs:
       targets: ${{ steps.set-targets.outputs.targets }}
       version: ${{ steps.set-targets.outputs.version }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            shared:
+              - 'images/docker/ubuntu-24.04/Dockerfile'
+              - 'images/docker/ubuntu-24.04/overlay/common/**'
+            github:
+              - 'images/docker/ubuntu-24.04/overlay/github/**'
+            gitea:
+              - 'images/docker/ubuntu-24.04/overlay/gitea/**'
+            gitlab:
+              - 'images/docker/ubuntu-24.04/overlay/gitlab/**'
+            docs_only:
+              - 'images/docker/ubuntu-24.04/*.md'
+
       - name: Validate manual dispatch version
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -58,6 +81,7 @@ jobs:
         run: |
           # Determine which targets to build
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual dispatch - use user selection
             VERSION="${{ github.event.inputs.version }}"
             TARGET="${{ github.event.inputs.target }}"
           elif [[ "${{ github.ref }}" == refs/tags/ubuntu-24.04-github/* ]]; then
@@ -68,15 +92,52 @@ jobs:
             TAG="${GITHUB_REF#refs/tags/}"
             VERSION="${TAG#ubuntu-24.04-gitea/}"
             TARGET="gitea-runner"
+          elif [[ "${{ github.ref }}" == refs/tags/ubuntu-24.04-gitlab/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#ubuntu-24.04-gitlab/}"
+            TARGET="gitlab-runner"
           else
-            # Push to main - build both with latest tag
+            # Push to main - smart detection based on changed paths
             VERSION="latest"
-            TARGET="both"
+
+            if [[ "${{ steps.changes.outputs.shared }}" == "true" ]]; then
+              # Shared files changed (Dockerfile or common overlay) - build all
+              echo "📦 Shared files changed - building all targets"
+              TARGET="all"
+            elif [[ "${{ steps.changes.outputs.docs_only }}" == "true" && \
+                    "${{ steps.changes.outputs.github }}" != "true" && \
+                    "${{ steps.changes.outputs.gitea }}" != "true" && \
+                    "${{ steps.changes.outputs.gitlab }}" != "true" ]]; then
+              # Only docs changed - skip builds
+              echo "📝 Only documentation changed - skipping builds"
+              TARGET="none"
+            else
+              # Build only changed targets
+              TARGETS_ARRAY=()
+              [[ "${{ steps.changes.outputs.github }}" == "true" ]] && TARGETS_ARRAY+=("github-runner")
+              [[ "${{ steps.changes.outputs.gitea }}" == "true" ]] && TARGETS_ARRAY+=("gitea-runner")
+              [[ "${{ steps.changes.outputs.gitlab }}" == "true" ]] && TARGETS_ARRAY+=("gitlab-runner")
+
+              if [[ ${#TARGETS_ARRAY[@]} -eq 0 ]]; then
+                echo "🤷 No relevant changes detected - skipping builds"
+                TARGET="none"
+              else
+                echo "🎯 Building changed targets: ${TARGETS_ARRAY[*]}"
+                # Build JSON array directly
+                printf -v TARGETS_JSON '"%s",' "${TARGETS_ARRAY[@]}"
+                TARGETS="[${TARGETS_JSON%,}]"
+                echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
+                echo "version=${VERSION}" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            fi
           fi
 
           # Build JSON array of targets
-          if [[ "${TARGET}" == "both" ]]; then
-            TARGETS='["github-runner","gitea-runner"]'
+          if [[ "${TARGET}" == "none" ]]; then
+            TARGETS='[]'
+          elif [[ "${TARGET}" == "all" ]]; then
+            TARGETS='["github-runner","gitea-runner","gitlab-runner"]'
           else
             TARGETS='["'"${TARGET}"'"]'
           fi
@@ -88,6 +149,7 @@ jobs:
   # Build each target image on native runners for each architecture
   build:
     needs: prepare
+    if: needs.prepare.outputs.targets != '[]'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -113,11 +175,11 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
           TARGET="${{ matrix.target }}"
           # Map target to image name: github-runner -> ubuntu-24.04-github
-          if [[ "${TARGET}" == "github-runner" ]]; then
-            IMAGE_SUFFIX="ubuntu-24.04-github"
-          else
-            IMAGE_SUFFIX="ubuntu-24.04-gitea"
-          fi
+          case "${TARGET}" in
+            github-runner) IMAGE_SUFFIX="ubuntu-24.04-github" ;;
+            gitea-runner)  IMAGE_SUFFIX="ubuntu-24.04-gitea" ;;
+            gitlab-runner) IMAGE_SUFFIX="ubuntu-24.04-gitlab" ;;
+          esac
           IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/${IMAGE_SUFFIX}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
@@ -172,6 +234,7 @@ jobs:
   # Create multi-arch manifests for each target
   manifest:
     needs: [prepare, build]
+    if: needs.prepare.outputs.targets != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -186,11 +249,11 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
           TARGET="${{ matrix.target }}"
           # Map target to image name: github-runner -> ubuntu-24.04-github
-          if [[ "${TARGET}" == "github-runner" ]]; then
-            IMAGE_SUFFIX="ubuntu-24.04-github"
-          else
-            IMAGE_SUFFIX="ubuntu-24.04-gitea"
-          fi
+          case "${TARGET}" in
+            github-runner) IMAGE_SUFFIX="ubuntu-24.04-github" ;;
+            gitea-runner)  IMAGE_SUFFIX="ubuntu-24.04-gitea" ;;
+            gitlab-runner) IMAGE_SUFFIX="ubuntu-24.04-gitlab" ;;
+          esac
           IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_BASE }}/${IMAGE_SUFFIX}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
@@ -259,6 +322,7 @@ jobs:
         package:
           - fireactions-images/ubuntu-24.04-github
           - fireactions-images/ubuntu-24.04-gitea
+          - fireactions-images/ubuntu-24.04-gitlab
     steps:
       - name: Delete orphaned images
         uses: dataaxiom/ghcr-cleanup-action@v1

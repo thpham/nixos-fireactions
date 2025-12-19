@@ -2,7 +2,7 @@
 
 All notable changes to the Ubuntu 24.04 runner images will be documented in this file.
 
-Versioning format: `{runner_version}-{increment}` (e.g., `2.330.0-1` for GitHub, `0.2.13-1` for Gitea)
+Versioning format: `{runner_version}-{increment}` (e.g., `2.330.0-1` for GitHub, `0.2.13-1` for Gitea, `18.7.0-1` for GitLab)
 
 ## GitHub Runner
 
@@ -40,3 +40,25 @@ Ephemeral runner mode for proper VM recycling.
 | act_runner | 0.2.13    |
 | fireteact  | latest    |
 | Docker CE  | latest    |
+
+## GitLab Runner
+
+### [18.7.0-1] - Unreleased
+
+Initial release with GitLab CI runner support.
+
+#### Features
+
+- **Dynamic runner creation**: Uses POST /api/v4/user/runners for glrt-\* tokens
+- **Automatic cleanup**: DELETE /api/v4/runners/:id on VM exit
+- **Runner types**: Support for instance_type, group_type, and project_type
+- **Ephemeral runners**: One job per VM with immediate recycling
+
+#### Components
+
+| Component     | Version   |
+| ------------- | --------- |
+| Ubuntu        | 24.04 LTS |
+| gitlab-runner | 18.7.0    |
+| fireglab      | 0.1.0-dev |
+| Docker CE     | latest    |
