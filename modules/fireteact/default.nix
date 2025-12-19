@@ -109,6 +109,9 @@ let
 in
 {
   imports = [
+    # Note: microvm-base and registry-cache are imported separately by hosts/default.nix
+    # as foundation and caching layers respectively
+    # Fireteact-specific modules
     ./services.nix
   ];
 
@@ -124,7 +127,6 @@ in
       default = fireteactPkg;
       description = "The fireteact package to use";
     };
-
 
     configFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
@@ -250,7 +252,11 @@ in
       };
 
       runnerScope = lib.mkOption {
-        type = lib.types.enum [ "instance" "org" "repo" ];
+        type = lib.types.enum [
+          "instance"
+          "org"
+          "repo"
+        ];
         default = "org";
         description = ''
           Scope for runner registration (affects security and token requirements):
@@ -310,7 +316,8 @@ in
       };
     };
 
-    # Kernel configuration (shared with fireactions)
+    # DEPRECATED: Kernel configuration moved to microvm-base
+    # Use services.microvm-base.kernel.* instead
     kernelSource = lib.mkOption {
       type = lib.types.enum [
         "upstream"
@@ -318,24 +325,25 @@ in
         "nixpkgs"
       ];
       default = "upstream";
+      visible = false;
       description = ''
-        Source for the guest kernel:
-        - "upstream": Pre-built Firecracker CI kernels (minimal, fast boot)
-        - "custom": Nix-built minimal kernel with Docker bridge networking support
-        - "nixpkgs": Full NixOS kernel package (largest, most features)
+        DEPRECATED: Use services.microvm-base.kernel.source instead.
+        Kernel configuration is now shared across all runner technologies.
       '';
     };
 
     kernelVersion = lib.mkOption {
       type = lib.types.str;
       default = "6.1.141";
-      description = "Kernel version when using upstream kernels";
+      visible = false;
+      description = "DEPRECATED: Use services.microvm-base.kernel.version instead.";
     };
 
     kernelPackage = lib.mkOption {
       type = lib.types.package;
       default = pkgs.linuxPackages_6_12.kernel;
-      description = "Kernel package to use when kernelSource is 'nixpkgs'";
+      visible = false;
+      description = "DEPRECATED: Use services.microvm-base.kernel.package instead.";
     };
 
     # Pool configuration
@@ -376,14 +384,25 @@ in
       {
         assertion =
           cfg.configFile != null
-          || (cfg.pools != [ ] && (cfg.gitea.instanceUrl != null || cfg.gitea.instanceUrlFile != null) && (cfg.gitea.apiToken != null || cfg.gitea.apiTokenFile != null));
+          || (
+            cfg.pools != [ ]
+            && (cfg.gitea.instanceUrl != null || cfg.gitea.instanceUrlFile != null)
+            && (cfg.gitea.apiToken != null || cfg.gitea.apiTokenFile != null)
+          );
         message = "Either configFile must be set, or pools, gitea.instanceUrl/instanceUrlFile, and gitea.apiToken/apiTokenFile must be configured";
       }
       {
         assertion =
           cfg.gitea.runnerScope == "instance"
-          || (cfg.gitea.runnerScope == "org" && (cfg.gitea.runnerOwner != null || cfg.gitea.runnerOwnerFile != null))
-          || (cfg.gitea.runnerScope == "repo" && (cfg.gitea.runnerOwner != null || cfg.gitea.runnerOwnerFile != null) && (cfg.gitea.runnerRepo != null || cfg.gitea.runnerRepoFile != null));
+          || (
+            cfg.gitea.runnerScope == "org"
+            && (cfg.gitea.runnerOwner != null || cfg.gitea.runnerOwnerFile != null)
+          )
+          || (
+            cfg.gitea.runnerScope == "repo"
+            && (cfg.gitea.runnerOwner != null || cfg.gitea.runnerOwnerFile != null)
+            && (cfg.gitea.runnerRepo != null || cfg.gitea.runnerRepoFile != null)
+          );
         message = "runnerOwner/runnerOwnerFile is required for org scope; runnerOwner/runnerOwnerFile and runnerRepo/runnerRepoFile are required for repo scope";
       }
     ];

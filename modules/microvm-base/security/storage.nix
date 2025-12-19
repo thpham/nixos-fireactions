@@ -1,10 +1,13 @@
-# Storage security for Firecracker microVMs
+# Storage security for microVM infrastructure
 #
-# Implements secure storage handling:
-# - LUKS encryption for data-at-rest protection
-# - Secure deletion with TRIM/discard or zero-fill
+# Implements secure storage handling at the infrastructure level:
+# - LUKS encryption for containerd devmapper data-at-rest protection
 # - Ephemeral key option for maximum security
-# - Enhanced containerd devmapper configuration
+# - Tmpfs mount for sensitive runtime data (keys, credentials)
+# - Secure deletion configuration for containerd
+#
+# These settings benefit all Firecracker-based runner technologies.
+# Runner-specific cleanup timers remain in the respective modules.
 
 {
   config,
@@ -14,17 +17,21 @@
 }:
 
 let
-  cfg = config.services.fireactions.security;
+  cfg = config.services.microvm-base.security;
   storageCfg = cfg.storage;
-  fireactionsCfg = config.services.fireactions;
+  baseCfg = config.services.microvm-base;
+
+  # Pool name for devmapper - must match containerd config in ../containerd.nix
+  poolName = "containerd-pool";
 in
 {
-  options.services.fireactions.security.storage = {
+  options.services.microvm-base.security.storage = {
     enable = lib.mkEnableOption ''
-      Storage security enhancements for Firecracker microVMs.
+      Storage security enhancements for microVM infrastructure.
 
-      Enables secure deletion of VM data after job completion.
-      Optionally enables LUKS encryption for data-at-rest protection.
+      Enables secure handling of containerd devmapper storage used by
+      all Firecracker-based runners. Optionally enables LUKS encryption
+      for data-at-rest protection.
     '';
 
     encryption = {
@@ -50,11 +57,10 @@ in
         type = lib.types.bool;
         default = true;
         description = ''
-          Enable secure deletion of VM storage after job completion.
+          Enable secure deletion support for VM storage.
 
-          Uses TRIM/discard commands to inform the storage device
-          that blocks are no longer in use, allowing SSDs to securely
-          erase the data.
+          Configures containerd devmapper to use TRIM/discard commands,
+          allowing SSDs to securely erase data when blocks are freed.
         '';
       };
 
@@ -95,12 +101,23 @@ in
         default = "64M";
         description = "Size of the tmpfs secrets mount";
       };
+
+      path = lib.mkOption {
+        type = lib.types.str;
+        default = "/run/microvm-base/secrets";
+        description = "Path for the tmpfs secrets mount";
+      };
     };
   };
 
   config = lib.mkIf (cfg.enable && storageCfg.enable) {
+    # Add cryptsetup to system packages when encryption is enabled (for verification)
+    environment.systemPackages = lib.mkIf storageCfg.encryption.enable [
+      pkgs.cryptsetup
+    ];
+
     # Tmpfs mount for sensitive data
-    fileSystems."/run/fireactions/secrets" = lib.mkIf storageCfg.tmpfsSecrets.enable {
+    fileSystems.${storageCfg.tmpfsSecrets.path} = lib.mkIf storageCfg.tmpfsSecrets.enable {
       device = "tmpfs";
       fsType = "tmpfs";
       options = [
@@ -139,7 +156,7 @@ in
         DATA_FILE="$POOL_DIR/data"
         META_FILE="$POOL_DIR/metadata"
         LUKS_NAME="containerd-data-crypt"
-        KEY_FILE="/run/fireactions/secrets/storage.key"
+        KEY_FILE="${storageCfg.tmpfsSecrets.path}/storage.key"
 
         # Skip if pool already exists
         if dmsetup status containerd-pool &>/dev/null; then
@@ -151,7 +168,7 @@ in
 
         # Create sparse files if they don't exist
         if [ ! -f "$DATA_FILE" ]; then
-          truncate -s 20G "$DATA_FILE"
+          truncate -s ${baseCfg.containerd.thinPoolSize} "$DATA_FILE"
         fi
         if [ ! -f "$META_FILE" ]; then
           truncate -s 200M "$META_FILE"
@@ -213,7 +230,7 @@ in
             # Detach loop, wipe data file, reattach
             losetup -d "$DATA_LOOP"
             truncate -s 0 "$DATA_FILE"
-            truncate -s 20G "$DATA_FILE"
+            truncate -s ${baseCfg.containerd.thinPoolSize} "$DATA_FILE"
             DATA_LOOP=$(losetup --find --show "$DATA_FILE")
             format_luks
             cryptsetup open \
@@ -269,10 +286,18 @@ in
       };
     };
 
-    # Secure snapshot cleanup service
-    systemd.services.fireactions-snapshot-cleanup = lib.mkIf storageCfg.secureDelete.enable {
-      description = "Securely cleanup Firecracker VM snapshots";
-      # Run periodically and on shutdown
+    # Configure containerd to use discard
+    virtualisation.containerd.settings.plugins."io.containerd.snapshotter.v1.devmapper" =
+      lib.mkIf storageCfg.secureDelete.enable
+        {
+          discard_blocks = true;
+        };
+
+    #
+    # Secure snapshot cleanup service (shared across all runner technologies)
+    #
+    systemd.services.microvm-snapshot-cleanup = lib.mkIf storageCfg.secureDelete.enable {
+      description = "Securely cleanup microVM thin-provisioned snapshots";
       wantedBy = [ "multi-user.target" ];
       after = [ "containerd.service" ];
 
@@ -283,49 +308,44 @@ in
 
       path = [
         pkgs.util-linux
+        pkgs.lvm2
         pkgs.coreutils
       ];
 
       # Cleanup on stop (shutdown)
       preStop = ''
-        echo "Performing secure snapshot cleanup..."
+        echo "Performing secure snapshot cleanup for ${poolName}..."
 
-        SNAPSHOT_DIR="/var/lib/containerd/io.containerd.snapshotter.v1.devmapper/snapshots"
+        # Find all snapshot devices for this pool
+        for device in /dev/mapper/${poolName}-snap-*; do
+          if [ -b "$device" ]; then
+            DEVICE_NAME=$(basename "$device")
+            echo "Cleaning snapshot: $DEVICE_NAME"
 
-        if [ -d "$SNAPSHOT_DIR" ]; then
-          for snapshot in "$SNAPSHOT_DIR"/*; do
-            if [ -d "$snapshot" ]; then
-              DEVICE_NAME=$(basename "$snapshot")
+            ${
+              if storageCfg.secureDelete.method == "discard" then
+                ''
+                  # Use blkdiscard for secure deletion on SSDs
+                  ${pkgs.util-linux}/bin/blkdiscard "$device" 2>/dev/null || true
+                ''
+              else
+                ''
+                  # Zero-fill for non-SSD storage
+                  dd if=/dev/zero of="$device" bs=1M status=none 2>/dev/null || true
+                ''
+            }
+          fi
+        done
 
-              ${
-                if storageCfg.secureDelete.method == "discard" then
-                  ''
-                    # Use blkdiscard for secure deletion on SSDs
-                    if [ -b "/dev/mapper/fc-$DEVICE_NAME" ]; then
-                      ${pkgs.util-linux}/bin/blkdiscard "/dev/mapper/fc-$DEVICE_NAME" 2>/dev/null || true
-                    fi
-                  ''
-                else
-                  ''
-                    # Zero-fill for non-SSD storage
-                    if [ -b "/dev/mapper/fc-$DEVICE_NAME" ]; then
-                      dd if=/dev/zero of="/dev/mapper/fc-$DEVICE_NAME" bs=1M 2>/dev/null || true
-                    fi
-                  ''
-              }
-            fi
-          done
-        fi
-
-        echo "Secure cleanup completed"
+        echo "Secure snapshot cleanup completed"
       '';
 
       script = "true"; # No-op on start
     };
 
     # Timer for periodic cleanup of stale snapshots
-    systemd.timers.fireactions-snapshot-cleanup = lib.mkIf storageCfg.secureDelete.enable {
-      description = "Periodic secure snapshot cleanup";
+    systemd.timers.microvm-snapshot-cleanup = lib.mkIf storageCfg.secureDelete.enable {
+      description = "Periodic secure snapshot cleanup for microVMs";
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnBootSec = "10m";
@@ -333,12 +353,5 @@ in
         RandomizedDelaySec = "5m";
       };
     };
-
-    # Configure containerd to use discard
-    virtualisation.containerd.settings.plugins."io.containerd.snapshotter.v1.devmapper" =
-      lib.mkIf storageCfg.secureDelete.enable
-        {
-          discard_blocks = true;
-        };
   };
 }

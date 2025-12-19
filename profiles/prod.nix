@@ -1,12 +1,20 @@
 # Production environment profile
 # Applied to hosts tagged with "prod"
-{ lib, ... }:
+{ config, lib, ... }:
 
 {
-  # Production-grade fireactions settings
-  services.fireactions = {
+  # Shared kernel configuration (required for container workloads with Docker bridge)
+  services.microvm-base.kernel.source = lib.mkDefault "custom";
+
+  # Fireactions prod settings (only if enabled)
+  services.fireactions = lib.mkIf config.services.fireactions.enable {
     logLevel = lib.mkDefault "warn";
     metricsEnable = lib.mkDefault true;
+  };
+
+  # Fireteact prod settings (only if enabled)
+  services.fireteact = lib.mkIf config.services.fireteact.enable {
+    logLevel = lib.mkDefault "warn";
   };
 
   # Stricter security for production
@@ -23,7 +31,7 @@
 
   # Enable automatic security updates
   system.autoUpgrade = {
-    enable = lib.mkDefault false;  # Disabled - use colmena for controlled updates
+    enable = lib.mkDefault false; # Disabled - use colmena for controlled updates
     allowReboot = false;
   };
 }

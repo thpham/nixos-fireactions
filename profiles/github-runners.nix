@@ -1,8 +1,8 @@
 # Runners workload profile
-# Applied to hosts tagged with "runners"
+# Applied to hosts tagged with "github-runners"
 # Enables fireactions with shared GitHub App credentials
 #
-# NOTE: Pool configuration comes from size profiles (small/medium/large)
+# NOTE: Pool configuration comes from size profiles (fireactions-small/medium/large)
 # This profile only enables the service and sets credentials
 { config, ... }:
 
@@ -10,7 +10,6 @@
   # Enable fireactions service
   services.fireactions = {
     enable = true;
-    kernelSource = "custom";
 
     # GitHub App credentials (shared across all runners)
     # Secrets are managed by sops-nix (see deploy/secrets.nix)

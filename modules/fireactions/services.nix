@@ -1,11 +1,28 @@
 # Fireactions systemd services and system configuration
 #
 # This file contains:
+# - User/group configuration
+# - CNI configuration for fireactions
+# - systemd services (fireactions, kernel setup, config injection)
+# - Built-in security hardening (systemd isolation, network isolation)
+#
+# Delegated to microvm-base:
 # - Boot configuration (kernel modules, sysctl)
 # - containerd and devmapper setup
-# - CNI configuration
-# - systemd services (fireactions, kernel setup, config injection)
-# - Network configuration (firewall, NAT)
+# - Bridge creation via systemd-networkd
+# - DNSmasq configuration
+# - NAT configuration
+# - CNI plugins setup
+# - Storage security (LUKS, tmpfs secrets, snapshot cleanup)
+#
+# Delegated to registry-cache (standalone module):
+# - Zot/Squid caching services
+#
+# Security model:
+# - Firecracker's KVM-based VM isolation is the primary security boundary
+# - Network isolation (VM-to-VM blocking, metadata protection) is always enabled
+# - Systemd service hardening is always enabled
+# - Host-level security (sysctls, LUKS) is in microvm-base.security
 
 {
   config,
@@ -16,28 +33,16 @@
 
 let
   cfg = config.services.fireactions;
-  registryCacheCfg = config.services.fireactions.registryCache;
+  # Access standalone registry-cache module (no longer nested under fireactions)
+  registryCacheCfg = config.services.registry-cache;
+  # Access shared infrastructure from microvm-base
+  microvmBaseCfg = config.services.microvm-base;
 
-  # Import our custom packages
-  firecrackerKernelPkg = pkgs.callPackage ../../pkgs/firecracker-kernel.nix {
-    kernelVersion = cfg.kernelVersion;
-  };
-  firecrackerKernelCustomPkg = pkgs.callPackage ../../pkgs/firecracker-kernel-custom.nix { };
-  tcRedirectTapPkg = pkgs.callPackage ../../pkgs/tc-redirect-tap.nix { };
+  # Kernel path from microvm-base (shared by all runner technologies)
+  kernelPath = microvmBaseCfg._internal.kernelPath;
 
-  # Determine kernel path based on source
-  kernelPath =
-    if cfg.kernelSource == "upstream" then
-      "${firecrackerKernelPkg}/vmlinux"
-    else if cfg.kernelSource == "custom" then
-      "${firecrackerKernelCustomPkg}/vmlinux"
-    else if cfg.kernelSource == "nixpkgs" then
-      if pkgs.stdenv.hostPlatform.system == "x86_64-linux" then
-        "${cfg.kernelPackage.dev}/vmlinux"
-      else
-        "${cfg.kernelPackage.out}/${pkgs.stdenv.hostPlatform.linux-kernel.target}"
-    else
-      throw "Invalid kernelSource: ${cfg.kernelSource}";
+  # tc-redirect-tap from microvm-base
+  tcRedirectTapPkg = microvmBaseCfg._internal.tcRedirectTapPkg;
 
   # CNI configuration
   cniConfig = {
@@ -61,6 +66,37 @@ let
   };
 
   cniConfigFile = pkgs.writeText "fireactions.conflist" (builtins.toJSON cniConfig);
+
+  #
+  # Network isolation configuration (always enabled)
+  #
+
+  # Calculate gateway IP from subnet (e.g., 10.200.0.0/24 -> 10.200.0.1)
+  subnetParts = lib.splitString "/" cfg.networking.subnet;
+  networkAddr = builtins.head subnetParts;
+  networkOctets = lib.splitString "." networkAddr;
+  gatewayIp = lib.concatStringsSep "." (lib.take 3 networkOctets ++ [ "1" ]);
+
+  # Network isolation settings (hardcoded for security - not configurable)
+  networkIsolation = {
+    blockVmToVm = true;
+    blockCloudMetadata = true;
+    rateLimitConnections = 100;
+    allowedHostPorts = [
+      53 # DNS (dnsmasq)
+      67 # DHCP
+      3128 # Squid HTTP proxy
+      3129 # Squid HTTPS proxy (SSL bump)
+      5000 # Zot registry cache
+    ];
+    allowedHostUdpPorts = [
+      53 # DNS
+      67 # DHCP
+    ];
+  };
+
+  # Format port list for nftables
+  formatPorts = ports: lib.concatMapStringsSep ", " toString ports;
 
   # Generate fireactions config from NixOS options (upstream YAML format)
   fireactionsConfig = {
@@ -129,19 +165,16 @@ in
 {
   config = lib.mkIf cfg.enable {
     #
-    # Boot Configuration
+    # Register bridge with microvm-base (shared infrastructure)
     #
 
-    # Ensure KVM is available
-    boot.kernelModules = [
-      "kvm-intel"
-      "kvm-amd"
-    ];
-
-    # Enable IP forwarding for microVM networking
-    boot.kernel.sysctl = {
-      "net.ipv4.ip_forward" = 1;
-      "net.ipv4.conf.all.forwarding" = 1;
+    services.microvm-base = {
+      enable = true;
+      bridges.fireactions = {
+        bridgeName = cfg.networking.bridgeName;
+        subnet = cfg.networking.subnet;
+        externalInterface = cfg.networking.externalInterface;
+      };
     };
 
     #
@@ -159,33 +192,9 @@ in
 
     users.groups.${cfg.group} = lib.mkIf (cfg.group != "root") { };
 
-    # Ensure /dev/kvm is accessible
-    services.udev.extraRules = ''
-      KERNEL=="kvm", GROUP="kvm", MODE="0660"
-    '';
-
     #
-    # containerd Configuration
+    # containerd Registry Mirrors (when registry-cache is enabled)
     #
-
-    # Enable containerd for OCI image handling
-    # Firecracker requires devmapper snapshotter for block device support
-    virtualisation.containerd = {
-      enable = true;
-      settings = {
-        version = 2;
-        plugins."io.containerd.grpc.v1.cri" = {
-          sandbox_image = "pause:3.9";
-        };
-        # Configure devmapper snapshotter for Firecracker
-        plugins."io.containerd.snapshotter.v1.devmapper" = {
-          root_path = "/var/lib/containerd/devmapper";
-          pool_name = "containerd-pool";
-          base_image_size = "10GB";
-          async_remove = true;
-        };
-      };
-    };
 
     # Add registry mirrors to containerd when Zot is enabled
     # This allows the host's containerd to use the Zot cache for pulling runner images
@@ -196,97 +205,11 @@ in
             name: _mirror:
             let
               # Zot serves mirrors under namespace paths: http://gateway:5000/v2/<registry>/
-              endpoint = "http://${registryCacheCfg._internal.gateway}:${toString registryCacheCfg._internal.zotPort}";
+              endpoint = "http://${registryCacheCfg._internal.primaryGateway}:${toString registryCacheCfg._internal.zotPort}";
             in
             lib.nameValuePair name { endpoint = [ endpoint ]; }
           ) registryCacheCfg._internal.zotMirrors
         );
-
-    # Add required tools to containerd's PATH for devmapper snapshotter
-    # - util-linux: blkdiscard for TRIM/discard (required by containerd plugins)
-    # - lvm2: dmsetup for device mapper operations
-    # - thin-provisioning-tools: thin_check, thin_repair for thin pools
-    # - e2fsprogs: mkfs.ext4 for formatting snapshot volumes
-    systemd.services.containerd.path = [
-      pkgs.util-linux
-      pkgs.lvm2
-      pkgs.thin-provisioning-tools
-      pkgs.e2fsprogs
-    ];
-
-    #
-    # Devmapper Setup Services
-    #
-
-    # Setup devmapper thin-pool for containerd (required for Firecracker)
-    systemd.services.containerd-devmapper-setup = {
-      description = "Setup devmapper thin-pool for containerd";
-      wantedBy = [ "containerd.service" ];
-      before = [ "containerd.service" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
-      path = [
-        pkgs.util-linux
-        pkgs.lvm2
-        pkgs.thin-provisioning-tools
-      ];
-      script = ''
-        set -euo pipefail
-
-        POOL_DIR="/var/lib/containerd/devmapper"
-        DATA_FILE="$POOL_DIR/data"
-        META_FILE="$POOL_DIR/metadata"
-
-        # Skip if pool already exists
-        if dmsetup status containerd-pool &>/dev/null; then
-          echo "containerd-pool already exists"
-          exit 0
-        fi
-
-        mkdir -p "$POOL_DIR"
-
-        # Create sparse files for thin-pool (20GB data, 200MB metadata)
-        if [ ! -f "$DATA_FILE" ]; then
-          truncate -s 20G "$DATA_FILE"
-        fi
-        if [ ! -f "$META_FILE" ]; then
-          truncate -s 200M "$META_FILE"
-        fi
-
-        # Setup loop devices
-        DATA_DEV=$(losetup --find --show "$DATA_FILE")
-        META_DEV=$(losetup --find --show "$META_FILE")
-
-        # Get sizes in 512-byte sectors
-        DATA_SIZE=$(blockdev --getsize "$DATA_DEV")
-        META_SIZE=$(blockdev --getsize "$META_DEV")
-
-        # Create thin-pool
-        # Format: start length thin-pool metadata_dev data_dev data_block_size low_water_mark
-        dmsetup create containerd-pool --table "0 $DATA_SIZE thin-pool $META_DEV $DATA_DEV 128 32768 1 skip_block_zeroing"
-
-        echo "containerd-pool created successfully"
-      '';
-    };
-
-    # Cleanup devmapper on shutdown
-    systemd.services.containerd-devmapper-cleanup = {
-      description = "Cleanup devmapper thin-pool for containerd";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "containerd.service" ];
-      path = [ pkgs.lvm2 ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        # Use PATH-relative command to avoid store path mismatches when building on target
-        ExecStop = pkgs.writeShellScript "devmapper-cleanup" ''
-          dmsetup remove containerd-pool || true
-        '';
-      };
-      script = "true"; # No-op on start
-    };
 
     #
     # System Packages
@@ -336,38 +259,11 @@ in
       "d /etc/fireactions 0750 ${cfg.user} ${cfg.group} -"
       "d /run/fireactions 0750 ${cfg.user} ${cfg.group} -"
       "d /var/log/fireactions 0750 ${cfg.user} ${cfg.group} -"
-      # Network namespace directory for Firecracker VMs
-      "d /run/netns 0755 root root -"
-      # CNI plugins directory (standard path used by CNI libraries)
-      "d /opt/cni/bin 0755 root root -"
-      # CNI cache directory
-      "d /var/lib/cni 0755 root root -"
     ];
 
     #
     # Setup Services
     #
-
-    # Symlink CNI plugins to standard /opt/cni/bin path
-    # CNI libraries often use this as a fallback regardless of config
-    systemd.services.cni-plugins-setup = {
-      description = "Setup CNI plugins in /opt/cni/bin";
-      wantedBy = [ "fireactions.service" ];
-      before = [ "fireactions.service" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
-      script = ''
-        mkdir -p /opt/cni/bin
-        # Link all CNI plugins
-        for plugin in ${pkgs.cni-plugins}/bin/*; do
-          ln -sf "$plugin" /opt/cni/bin/
-        done
-        # Link tc-redirect-tap
-        ln -sf ${tcRedirectTapPkg}/bin/tc-redirect-tap /opt/cni/bin/
-      '';
-    };
 
     # Link kernel to expected location
     systemd.services.fireactions-kernel-setup = {
@@ -407,7 +303,9 @@ in
         restartTriggers = [ configFile ];
 
         # Wait for registry-cache CA to be generated (only if SSL bump is enabled)
-        after = lib.optional (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") "registry-cache-ca-setup.service";
+        after = lib.optional (
+          needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off"
+        ) "registry-cache-ca-setup.service";
 
         serviceConfig = {
           Type = "oneshot";
@@ -449,20 +347,32 @@ in
           }"
 
           # Registry cache configuration
-          export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.gateway}"
-          export DEBUG_SSH_KEY_FILE="${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.debugSshKeyFile != null) registryCacheCfg._internal.debugSshKeyFile}"
+          export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.primaryGateway}"
+          export DEBUG_SSH_KEY_FILE="${
+            lib.optionalString (
+              needsRegistryCache && registryCacheCfg._internal.debugSshKeyFile != null
+            ) registryCacheCfg._internal.debugSshKeyFile
+          }"
 
           # Zot registry mirror configuration
           export ZOT_ENABLED="${lib.boolToString (needsRegistryCache && registryCacheCfg.zot.enable)}"
           export ZOT_PORT="${lib.optionalString needsRegistryCache (toString registryCacheCfg._internal.zotPort)}"
-          export ZOT_MIRRORS='${lib.optionalString needsRegistryCache (builtins.toJSON (
-            lib.mapAttrs (name: mirror: { url = mirror.url; }) registryCacheCfg._internal.zotMirrors
-          ))}'
+          export ZOT_MIRRORS='${
+            lib.optionalString needsRegistryCache (
+              builtins.toJSON (
+                lib.mapAttrs (name: mirror: { url = mirror.url; }) registryCacheCfg._internal.zotMirrors
+              )
+            )
+          }'
 
           # Squid SSL bump configuration
           export SQUID_SSL_BUMP_MODE="${lib.optionalString needsRegistryCache registryCacheCfg._internal.squidSslBumpMode}"
           export SQUID_SSL_BUMP_DOMAINS="${lib.optionalString needsRegistryCache (lib.concatStringsSep "," registryCacheCfg._internal.squidSslBumpDomains)}"
-          export SQUID_CA_FILE="${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") registryCacheCfg._internal.caCertPath}"
+          export SQUID_CA_FILE="${
+            lib.optionalString (
+              needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off"
+            ) registryCacheCfg._internal.caCertPath
+          }"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
 
@@ -496,7 +406,9 @@ in
         ++ lib.optional needsConfigService "fireactions-config.service"
         ++ lib.optional (registryCacheCfg.enable && registryCacheCfg.zot.enable) "zot.service";
         requires = [ "containerd.service" ] ++ lib.optional needsConfigService "fireactions-config.service";
-        wants = [ "network-online.target" ]
+        wants = [
+          "network-online.target"
+        ]
         ++ lib.optional (registryCacheCfg.enable && registryCacheCfg.zot.enable) "zot.service";
 
         # Restart when config changes
@@ -537,7 +449,11 @@ in
           # Working directory
           WorkingDirectory = cfg.dataDir;
 
-          # Security hardening
+          #
+          # Security hardening (built-in, always enabled)
+          #
+
+          # Basic isolation
           NoNewPrivileges = false; # Needs privileges for network setup
           ProtectSystem = "strict";
           ProtectHome = true;
@@ -551,6 +467,53 @@ in
             "/run/netns" # Symlink target
             "/var/lib/cni" # CNI plugin cache directory
           ];
+
+          # System call filtering - allow only necessary syscall groups
+          SystemCallFilter = [
+            "@system-service"
+            "@mount"
+            "@network-io"
+            "@privileged"
+            "~@obsolete"
+          ];
+          SystemCallArchitectures = "native";
+
+          # Memory protection
+          MemoryDenyWriteExecute = true;
+
+          # Personality restrictions
+          LockPersonality = true;
+
+          # Restrict address families to required ones
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+            "AF_NETLINK"
+          ];
+
+          # Restrict namespace creation (except network for VMs)
+          RestrictNamespaces = "~user pid ipc";
+
+          # Protect clock and kernel resources
+          ProtectClock = true;
+          ProtectKernelLogs = true;
+          ProtectKernelModules = true;
+          ProtectKernelTunables = true;
+          ProtectControlGroups = true;
+          ProtectProc = "invisible";
+
+          # Restrict realtime scheduling
+          RestrictRealtime = true;
+
+          # Restrict SUID/SGID execution
+          RestrictSUIDSGID = true;
+
+          # Private /dev with only needed devices
+          PrivateDevices = false; # Need /dev/kvm access
+
+          # Remove all capabilities not explicitly needed
+          SecureBits = "noroot-locked";
 
           # Capabilities for Firecracker networking
           AmbientCapabilities = [
@@ -570,57 +533,107 @@ in
       };
 
     #
-    # Network Configuration
+    # Firewall Configuration
     #
 
-    # Create the bridge interface via systemd-networkd
-    # This ensures the bridge exists before dnsmasq starts (CNI would only create it when containers run)
-    systemd.network = {
-      enable = true;
-      netdevs."10-${cfg.networking.bridgeName}" = {
-        netdevConfig = {
-          Name = cfg.networking.bridgeName;
-          Kind = "bridge";
-        };
-      };
-      networks."10-${cfg.networking.bridgeName}" = {
-        matchConfig.Name = cfg.networking.bridgeName;
-        networkConfig = {
-          ConfigureWithoutCarrier = true;
-        };
-        # Assign gateway IP to the bridge (first IP in subnet)
-        # CNI expects the bridge to have the gateway IP for routing
-        address = [
-          (let
-            # Parse subnet like "10.200.0.0/24" to get gateway "10.200.0.1/24"
-            parts = lib.splitString "/" cfg.networking.subnet;
-            network = lib.head parts;
-            prefix = lib.last parts;
-            octets = lib.splitString "." network;
-            gateway = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}.1/${prefix}";
-          in gateway)
-        ];
-        linkConfig.RequiredForOnline = "no";
-      };
-    };
-
-    # Firewall rules for microVM networking (optional, can be disabled)
+    # Firewall rules for metrics endpoint
     networking.firewall = {
       allowedTCPPorts = lib.mkIf cfg.metricsEnable [
         (lib.toInt (lib.last (lib.splitString ":" cfg.metricsAddress)))
       ];
-      trustedInterfaces = [ cfg.networking.bridgeName ];
     };
 
-    # NAT configuration for microVM networking
-    # CNI's ipMasq only creates NAT rules for CNI-assigned IPs, but our DHCP server
-    # assigns different IPs. This adds subnet-wide masquerading for all VM traffic.
-    # Use mkDefault to allow provider-specific overrides and merge with fireteact
-    networking.nat = {
-      enable = lib.mkDefault true;
-      internalInterfaces = [ cfg.networking.bridgeName ];
-      internalIPs = [ cfg.networking.subnet ];
-      externalInterface = lib.mkDefault cfg.networking.externalInterface;
+    #
+    # Network Isolation (Built-in, always enabled)
+    #
+    # Implements strict network segmentation for multi-tenant security:
+    # - Block VM-to-VM communication (prevent lateral movement)
+    # - Block access to cloud metadata service (169.254.169.254)
+    # - Rate limit outbound connections (prevent abuse)
+    # - Allow only specific gateway services (DNS, DHCP, proxy)
+    #
+
+    # Enable nftables for network isolation
+    networking.nftables.enable = true;
+
+    # nftables ruleset for VM isolation
+    networking.nftables.tables.fireactions_isolation = {
+      family = "inet";
+      content = ''
+        # Chain for forwarded traffic (VM to external, VM to VM)
+        chain forward {
+          type filter hook forward priority filter; policy accept;
+
+          # Always allow established/related connections
+          ct state established,related accept
+
+          # CRITICAL: Block VM-to-VM communication on bridge
+          # This prevents lateral movement between GitHub Actions jobs
+          iifname "${cfg.networking.bridgeName}" oifname "${cfg.networking.bridgeName}" \
+            counter drop comment "Block VM-to-VM traffic"
+
+          # Block access to cloud metadata services
+          # Azure IMDS, AWS IMDS, GCP metadata all use this IP
+          iifname "${cfg.networking.bridgeName}" ip daddr 169.254.169.254 \
+            counter drop comment "Block cloud metadata access"
+
+          # Also block the link-local range used by some cloud metadata
+          iifname "${cfg.networking.bridgeName}" ip daddr 169.254.0.0/16 \
+            counter drop comment "Block link-local metadata"
+
+          # Rate limit new outbound connections from VMs
+          iifname "${cfg.networking.bridgeName}" ct state new \
+            limit rate over ${toString networkIsolation.rateLimitConnections}/second burst 50 packets \
+            counter drop comment "Rate limit new connections"
+
+          # Allow VMs to reach external networks (via NAT)
+          iifname "${cfg.networking.bridgeName}" oifname != "${cfg.networking.bridgeName}" accept
+        }
+
+        # Chain for traffic to the host (gateway services)
+        chain input {
+          type filter hook input priority filter; policy accept;
+
+          # Always allow established/related
+          ct state established,related accept
+
+          # Allow loopback
+          iif lo accept
+
+          # Allow VMs to access specific TCP services on gateway
+          iifname "${cfg.networking.bridgeName}" ip daddr ${gatewayIp} \
+            tcp dport { ${formatPorts networkIsolation.allowedHostPorts} } accept
+
+          # Allow VMs to access specific UDP services on gateway
+          iifname "${cfg.networking.bridgeName}" ip daddr ${gatewayIp} \
+            udp dport { ${formatPorts networkIsolation.allowedHostUdpPorts} } accept
+
+          # Allow DHCP broadcast (client sends to 255.255.255.255:67)
+          iifname "${cfg.networking.bridgeName}" ip daddr 255.255.255.255 udp dport 67 accept
+
+          # Block VMs from accessing other host services
+          iifname "${cfg.networking.bridgeName}" ip daddr ${gatewayIp} \
+            counter drop comment "Block unauthorized gateway access"
+
+          # Block VMs from accessing host's external IP
+          # (they should only communicate via gateway IP on bridge)
+          # Exceptions:
+          # - 169.254.0.0/16: Firecracker MMDS (metadata service)
+          # - 255.255.255.255: DHCP broadcast
+          iifname "${cfg.networking.bridgeName}" \
+            ip daddr != ${gatewayIp} \
+            ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 255.255.255.255 } \
+            counter drop comment "Block VM to host external IP"
+        }
+      '';
+    };
+
+    # Kernel modules and sysctls for bridge traffic filtering
+    boot.kernelModules = [ "br_netfilter" ];
+    boot.kernel.sysctl = {
+      # Let nftables handle bridge traffic at L3
+      "net.bridge.bridge-nf-call-iptables" = lib.mkDefault 1;
+      "net.bridge.bridge-nf-call-ip6tables" = lib.mkDefault 1;
     };
   };
 }

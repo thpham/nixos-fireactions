@@ -1,10 +1,11 @@
-# Kernel and systemd hardening for Firecracker host
+# Kernel and host hardening for microVM infrastructure
 #
-# Implements security best practices:
+# Implements security best practices at the host level:
 # - Restrictive kernel sysctls (dmesg, kptr, sysrq, etc.)
 # - Network stack hardening (rp_filter, redirects, syncookies)
 # - Optional SMT/hyperthreading disable for Spectre mitigation
-# - Enhanced systemd service isolation
+#
+# These settings benefit all Firecracker-based runner technologies.
 
 {
   config,
@@ -14,11 +15,11 @@
 }:
 
 let
-  cfg = config.services.fireactions.security;
+  cfg = config.services.microvm-base.security;
   hardeningCfg = cfg.hardening;
 in
 {
-  options.services.fireactions.security.hardening = {
+  options.services.microvm-base.security.hardening = {
     sysctls = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -47,21 +48,6 @@ in
         Recommended for shared/multi-tenant infrastructure where
         security is prioritized over performance.
       '';
-    };
-
-    systemdHardening = {
-      enable = lib.mkOption {
-        type = lib.types.bool;
-        default = true;
-        description = ''
-          Enable enhanced systemd service hardening for fireactions.
-
-          Adds additional isolation beyond the base service config:
-          - System call filtering
-          - Memory execution restrictions
-          - Address family restrictions
-        '';
-      };
     };
   };
 
@@ -144,62 +130,10 @@ in
       "tsx_async_abort=full,nosmt"
     ];
 
-    # Enhanced systemd service hardening
-    systemd.services.fireactions.serviceConfig = lib.mkIf hardeningCfg.systemdHardening.enable {
-      # System call filtering - allow only necessary syscall groups
-      SystemCallFilter = [
-        "@system-service"
-        "@mount"
-        "@network-io"
-        "@privileged"
-        "~@obsolete"
-      ];
-      SystemCallArchitectures = "native";
-
-      # Memory protection
-      MemoryDenyWriteExecute = true;
-
-      # Personality restrictions
-      LockPersonality = true;
-
-      # Restrict address families to required ones
-      RestrictAddressFamilies = [
-        "AF_UNIX"
-        "AF_INET"
-        "AF_INET6"
-        "AF_NETLINK"
-      ];
-
-      # Restrict namespace creation (except network for VMs)
-      RestrictNamespaces = "~user pid ipc";
-
-      # Protect clock and kernel resources
-      ProtectClock = true;
-      ProtectKernelLogs = true;
-      ProtectKernelModules = true;
-      ProtectKernelTunables = true;
-      ProtectControlGroups = true;
-      ProtectProc = "invisible";
-
-      # Restrict realtime scheduling
-      RestrictRealtime = true;
-
-      # Restrict SUID/SGID execution
-      RestrictSUIDSGID = true;
-
-      # Private /dev with only needed devices
-      PrivateDevices = false; # Need /dev/kvm access
-
-      # Remove all capabilities not explicitly needed
-      # Note: CAP_SYS_ADMIN and CAP_NET_ADMIN are added in main module
-      SecureBits = "noroot-locked";
-    };
-
-    # Verify SMT is disabled when requested
-    systemd.services.fireactions-verify-smt = lib.mkIf hardeningCfg.disableHyperthreading {
+    # SMT verification service
+    systemd.services.microvm-base-verify-smt = lib.mkIf hardeningCfg.disableHyperthreading {
       description = "Verify SMT/Hyperthreading is disabled";
-      wantedBy = [ "fireactions.service" ];
-      before = [ "fireactions.service" ];
+      wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
