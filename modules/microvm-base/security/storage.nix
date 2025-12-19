@@ -1,10 +1,15 @@
 # Storage security for microVM infrastructure
 #
 # Implements secure storage handling at the infrastructure level:
-# - LUKS encryption for containerd devmapper data-at-rest protection
+# - LUKS encryption for containerd devmapper (both data and metadata)
 # - Ephemeral key option for maximum security
 # - Tmpfs mount for sensitive runtime data (keys, credentials)
 # - Secure deletion configuration for containerd
+#
+# Security model:
+# - Both thin-pool data AND metadata are LUKS encrypted
+# - Prevents any storage pattern analysis from leaked metadata
+# - Ephemeral keys regenerated each boot (defense in depth)
 #
 # These settings benefit all Firecracker-based runner technologies.
 # Runner-specific cleanup timers remain in the respective modules.
@@ -38,10 +43,11 @@ in
       enable = lib.mkEnableOption ''
         LUKS encryption for the containerd devmapper storage pool.
 
-        Encrypts all VM disk data at rest, protecting against:
+        Encrypts both data AND metadata at rest, protecting against:
         - Physical disk theft
         - Residual data exposure after VM deletion
         - Offline attacks on storage media
+        - Storage pattern analysis via metadata inspection
 
         Uses an ephemeral key generated at boot (stored in tmpfs, lost on reboot).
         This is ideal for Firecracker VMs since:
@@ -49,6 +55,11 @@ in
         - The devmapper thin-pool is recreated on each boot anyway
         - No key management complexity
         - Fresh encryption key on each boot = defense in depth
+
+        Encryption parameters:
+        - Cipher: AES-XTS-PLAIN64 with 512-bit key
+        - Hash: SHA-512 for header integrity
+        - PBKDF: Argon2id (256MB memory, 4 threads)
       '';
     };
 
@@ -155,7 +166,8 @@ in
         POOL_DIR="/var/lib/containerd/devmapper"
         DATA_FILE="$POOL_DIR/data"
         META_FILE="$POOL_DIR/metadata"
-        LUKS_NAME="containerd-data-crypt"
+        LUKS_DATA_NAME="containerd-data-crypt"
+        LUKS_META_NAME="containerd-meta-crypt"
         KEY_FILE="${storageCfg.tmpfsSecrets.path}/storage.key"
 
         # Skip if pool already exists
@@ -175,6 +187,7 @@ in
         fi
 
         # Generate ephemeral encryption key (new key each boot)
+        # Same key used for both data and metadata (both ephemeral)
         if [ ! -f "$KEY_FILE" ]; then
           mkdir -p "$(dirname "$KEY_FILE")"
           chmod 700 "$(dirname "$KEY_FILE")"
@@ -183,85 +196,157 @@ in
           echo "Generated ephemeral encryption key"
         fi
 
-        # Setup loop device for data file
+        # Setup loop devices
         DATA_LOOP=$(losetup --find --show "$DATA_FILE")
+        META_LOOP=$(losetup --find --show "$META_FILE")
 
-        # Function to format LUKS
+        # Function to format LUKS container
+        # Args: $1 = loop device, $2 = description
         format_luks() {
-          echo "Initializing LUKS encryption on data file..."
+          local loop_dev="$1"
+          local desc="$2"
+          echo "Initializing LUKS encryption on $desc..."
           cryptsetup luksFormat \
             --batch-mode \
             --type luks2 \
             --cipher aes-xts-plain64 \
             --key-size 512 \
-            --hash sha256 \
+            --hash sha512 \
             --pbkdf argon2id \
             --pbkdf-memory 262144 \
             --pbkdf-parallel 4 \
-            "$DATA_LOOP" \
+            "$loop_dev" \
             "$KEY_FILE"
-          echo "LUKS encryption initialized"
+          echo "LUKS encryption initialized on $desc"
         }
 
-        # Check if LUKS is already set up on data file
-        if cryptsetup isLuks "$DATA_LOOP" 2>/dev/null; then
-          echo "LUKS header found, attempting to open with current key..."
-          # Try to open with current ephemeral key
-          if ! cryptsetup open \
-               --type luks2 \
-               "$DATA_LOOP" \
-               "$LUKS_NAME" \
-               --key-file "$KEY_FILE" 2>/dev/null; then
-            echo "Failed to open LUKS - key mismatch (stale ephemeral key from previous boot)"
-            echo "Wiping and re-creating LUKS container with new ephemeral key..."
+        # Function to open or recreate LUKS container
+        # Args: $1 = loop device, $2 = luks name, $3 = description, $4 = file path, $5 = size
+        open_or_recreate_luks() {
+          local loop_dev="$1"
+          local luks_name="$2"
+          local desc="$3"
+          local file_path="$4"
+          local size="$5"
 
-            # Clear containerd's state since we're wiping the pool
-            # This forces containerd to re-pull images on next start
-            echo "Clearing containerd state (snapshots lost due to LUKS wipe)..."
-            # Clear devmapper plugin's metadata databases (not the sparse data/metadata files)
-            rm -f /var/lib/containerd/devmapper/*.db || true
-            # Clear containerd's main metadata (image references, snapshots)
-            rm -rf /var/lib/containerd/io.containerd.metadata.v1.bolt || true
+          if cryptsetup isLuks "$loop_dev" 2>/dev/null; then
+            echo "LUKS header found on $desc, attempting to open..."
+            if ! cryptsetup open \
+                 --type luks2 \
+                 "$loop_dev" \
+                 "$luks_name" \
+                 --key-file "$KEY_FILE" 2>/dev/null; then
+              echo "Failed to open $desc LUKS - key mismatch (stale ephemeral key)"
+              echo "Wiping and re-creating $desc LUKS container..."
 
-            # Also wipe the thin-pool metadata file (it references old data)
-            truncate -s 0 "$META_FILE"
-            truncate -s 200M "$META_FILE"
-
-            # Detach loop, wipe data file, reattach
-            losetup -d "$DATA_LOOP"
-            truncate -s 0 "$DATA_FILE"
-            truncate -s ${baseCfg.containerd.thinPoolSize} "$DATA_FILE"
-            DATA_LOOP=$(losetup --find --show "$DATA_FILE")
-            format_luks
+              # Detach loop, wipe file, reattach
+              losetup -d "$loop_dev"
+              truncate -s 0 "$file_path"
+              truncate -s "$size" "$file_path"
+              loop_dev=$(losetup --find --show "$file_path")
+              format_luks "$loop_dev" "$desc"
+              cryptsetup open \
+                --type luks2 \
+                "$loop_dev" \
+                "$luks_name" \
+                --key-file "$KEY_FILE"
+              # Return new loop device path
+              echo "$loop_dev"
+              return
+            fi
+            echo "LUKS container opened for $desc"
+          else
+            format_luks "$loop_dev" "$desc"
             cryptsetup open \
               --type luks2 \
-              "$DATA_LOOP" \
-              "$LUKS_NAME" \
+              "$loop_dev" \
+              "$luks_name" \
               --key-file "$KEY_FILE"
+            echo "LUKS container opened for $desc"
           fi
-          echo "LUKS container opened"
+          echo "$loop_dev"
+        }
+
+        # Check if we need to wipe (key mismatch on either data or metadata)
+        # Also track if metadata needs zeroing (fresh LUKS requires zeroed metadata for thin-pool)
+        NEEDS_WIPE=false
+        NEEDS_ZERO_META=false
+        if cryptsetup isLuks "$DATA_LOOP" 2>/dev/null; then
+          if ! cryptsetup open --test-passphrase --type luks2 "$DATA_LOOP" --key-file "$KEY_FILE" 2>/dev/null; then
+            NEEDS_WIPE=true
+          fi
         else
-          # No LUKS header - fresh format
-          format_luks
-          cryptsetup open \
-            --type luks2 \
-            "$DATA_LOOP" \
-            "$LUKS_NAME" \
-            --key-file "$KEY_FILE"
-          echo "LUKS container opened"
+          # Fresh data device - will need metadata zeroed too
+          NEEDS_ZERO_META=true
+        fi
+        if cryptsetup isLuks "$META_LOOP" 2>/dev/null; then
+          if ! cryptsetup open --test-passphrase --type luks2 "$META_LOOP" --key-file "$KEY_FILE" 2>/dev/null; then
+            NEEDS_WIPE=true
+          fi
+        else
+          # Fresh metadata device - needs zeroing for thin-pool
+          NEEDS_ZERO_META=true
         fi
 
-        # Setup metadata loop device
-        META_LOOP=$(losetup --find --show "$META_FILE")
+        if [ "$NEEDS_WIPE" = true ]; then
+          echo "Key mismatch detected - wiping both data and metadata..."
+          NEEDS_ZERO_META=true  # Wiped metadata needs zeroing
+          # Clear containerd's state since we're wiping the pool
+          echo "Clearing containerd state (snapshots lost due to LUKS wipe)..."
+          rm -f /var/lib/containerd/devmapper/*.db || true
+          rm -rf /var/lib/containerd/io.containerd.metadata.v1.bolt || true
 
-        # Get sizes in 512-byte sectors
-        DATA_SIZE=$(blockdev --getsize "/dev/mapper/$LUKS_NAME")
+          # Detach loops and wipe files
+          losetup -d "$DATA_LOOP" || true
+          losetup -d "$META_LOOP" || true
+          truncate -s 0 "$DATA_FILE"
+          truncate -s 0 "$META_FILE"
+          truncate -s ${baseCfg.containerd.thinPoolSize} "$DATA_FILE"
+          truncate -s 200M "$META_FILE"
+          DATA_LOOP=$(losetup --find --show "$DATA_FILE")
+          META_LOOP=$(losetup --find --show "$META_FILE")
+        fi
 
-        # Create thin-pool with LUKS-encrypted data device
+        # Open or create data LUKS
+        if ! cryptsetup status "$LUKS_DATA_NAME" &>/dev/null; then
+          if cryptsetup isLuks "$DATA_LOOP" 2>/dev/null; then
+            cryptsetup open --type luks2 "$DATA_LOOP" "$LUKS_DATA_NAME" --key-file "$KEY_FILE"
+            echo "Data LUKS container opened"
+          else
+            format_luks "$DATA_LOOP" "data file"
+            cryptsetup open --type luks2 "$DATA_LOOP" "$LUKS_DATA_NAME" --key-file "$KEY_FILE"
+            echo "Data LUKS container created and opened"
+          fi
+        fi
+
+        # Open or create metadata LUKS
+        if ! cryptsetup status "$LUKS_META_NAME" &>/dev/null; then
+          if cryptsetup isLuks "$META_LOOP" 2>/dev/null; then
+            cryptsetup open --type luks2 "$META_LOOP" "$LUKS_META_NAME" --key-file "$KEY_FILE"
+            echo "Metadata LUKS container opened"
+          else
+            format_luks "$META_LOOP" "metadata file"
+            cryptsetup open --type luks2 "$META_LOOP" "$LUKS_META_NAME" --key-file "$KEY_FILE"
+            echo "Metadata LUKS container created and opened"
+          fi
+        fi
+
+        # Get sizes in 512-byte sectors (use encrypted data device size)
+        DATA_SIZE=$(blockdev --getsize "/dev/mapper/$LUKS_DATA_NAME")
+
+        # Zero metadata device if fresh (thin-pool requires zeroed metadata to initialize)
+        # This is needed because LUKS-encrypted empty space appears as random data
+        if [ "$NEEDS_ZERO_META" = true ]; then
+          echo "Zeroing metadata device for thin-pool initialization..."
+          dd if=/dev/zero of="/dev/mapper/$LUKS_META_NAME" bs=1M status=progress 2>/dev/null || true
+          echo "Metadata device zeroed"
+        fi
+
+        # Create thin-pool with BOTH data and metadata encrypted
         dmsetup create containerd-pool \
-          --table "0 $DATA_SIZE thin-pool $META_LOOP /dev/mapper/$LUKS_NAME 128 32768 1 skip_block_zeroing"
+          --table "0 $DATA_SIZE thin-pool /dev/mapper/$LUKS_META_NAME /dev/mapper/$LUKS_DATA_NAME 128 32768 1 skip_block_zeroing"
 
-        echo "containerd-pool created with LUKS encryption"
+        echo "containerd-pool created with full LUKS encryption (data + metadata)"
       '';
     };
 
@@ -279,9 +364,11 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
         # Use PATH-relative commands - packages are in service's path
+        # Close both data and metadata LUKS containers
         ExecStop = pkgs.writeShellScript "devmapper-luks-cleanup" ''
           dmsetup remove containerd-pool || true
           cryptsetup close containerd-data-crypt || true
+          cryptsetup close containerd-meta-crypt || true
         '';
       };
     };

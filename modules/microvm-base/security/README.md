@@ -81,9 +81,14 @@ Provides data-at-rest protection for the containerd devmapper pool:
 
 **LUKS Encryption:**
 
+Both data AND metadata are encrypted for complete defense-in-depth:
+
+- `containerd-data-crypt`: VM disk data (20GB default)
+- `containerd-meta-crypt`: Thin-pool metadata (200MB)
 - AES-XTS-PLAIN64 with 512-bit key
-- Argon2id key derivation
-- Ephemeral key generated at each boot (stored in tmpfs)
+- SHA-512 for header integrity
+- Argon2id key derivation (256MB memory, 4 threads)
+- Ephemeral key generated at each boot (stored in tmpfs, shared by both)
 
 **Tmpfs Secrets:**
 
@@ -168,8 +173,11 @@ sysctl net.ipv4.conf.all.rp_filter
 Verify LUKS encryption (if enabled):
 
 ```bash
+# Both data and metadata should be encrypted
 cryptsetup status containerd-data-crypt
+cryptsetup status containerd-meta-crypt
 dmsetup status containerd-pool
+lsblk  # Should show both loop devices with LUKS layer
 ```
 
 Check tmpfs secrets mount:
