@@ -3,8 +3,11 @@
 # Module structure:
 # - default.nix (this file): Entry point, option definitions
 # - services.nix: systemd services and system configuration
-# - registry-cache.nix: Zot/Squid registry caching (optional)
 # - security/: Security hardening submodule (optional)
+#
+# Dependencies:
+# - microvm-base: Shared infrastructure (bridges, containerd, DNSmasq)
+# - registry-cache: Optional caching (standalone module)
 #
 # Usage:
 #   services.fireactions.enable = true;
@@ -126,8 +129,10 @@ let
 in
 {
   imports = [
+    # Note: microvm-base and registry-cache are imported separately by hosts/default.nix
+    # as foundation and caching layers respectively
+    # Fireactions-specific modules
     ./services.nix
-    ./registry-cache.nix
     ./security
   ];
 
@@ -263,7 +268,8 @@ in
       };
     };
 
-    # Kernel configuration
+    # DEPRECATED: Kernel configuration moved to microvm-base
+    # Use services.microvm-base.kernel.* instead
     kernelSource = lib.mkOption {
       type = lib.types.enum [
         "upstream"
@@ -271,24 +277,25 @@ in
         "nixpkgs"
       ];
       default = "upstream";
+      visible = false;
       description = ''
-        Source for the guest kernel:
-        - "upstream": Pre-built Firecracker CI kernels (minimal, fast boot)
-        - "custom": Nix-built minimal kernel with Docker bridge networking support (recommended for Docker workflows)
-        - "nixpkgs": Full NixOS kernel package (largest, most features)
+        DEPRECATED: Use services.microvm-base.kernel.source instead.
+        Kernel configuration is now shared across all runner technologies.
       '';
     };
 
     kernelVersion = lib.mkOption {
       type = lib.types.str;
       default = "6.1.141";
-      description = "Kernel version when using upstream kernels";
+      visible = false;
+      description = "DEPRECATED: Use services.microvm-base.kernel.version instead.";
     };
 
     kernelPackage = lib.mkOption {
       type = lib.types.package;
       default = pkgs.linuxPackages_6_12.kernel;
-      description = "Kernel package to use when kernelSource is 'nixpkgs'";
+      visible = false;
+      description = "DEPRECATED: Use services.microvm-base.kernel.package instead.";
     };
 
     # Pool configuration

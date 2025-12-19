@@ -181,9 +181,17 @@
     // {
       # NixOS modules (not system-specific)
       nixosModules = {
+        # Foundation layer (shared infrastructure)
+        microvm-base = import ./modules/microvm-base;
+
+        # Standalone caching layer (works with any runner)
+        registry-cache = import ./modules/registry-cache;
+
+        # Runner technologies
         fireactions = import ./modules/fireactions;
         fireteact = import ./modules/fireteact;
-        # Backwards compatibility alias
+
+        # Backwards compatibility aliases
         fireactions-node = self.nixosModules.fireactions;
         default = self.nixosModules.fireactions;
       };
@@ -209,6 +217,10 @@
               inherit system;
               modules = [
                 disko.nixosModules.disko
+                # Foundation layer (required by fireactions)
+                self.nixosModules.microvm-base
+                self.nixosModules.registry-cache
+                # Runner
                 self.nixosModules.fireactions
                 ./deploy/configuration.nix
                 { disko.devices.disk.disk1.device = device; }
@@ -223,6 +235,10 @@
               modules = [
                 ./deploy/digitalocean.nix
                 disko.nixosModules.disko
+                # Foundation layer (required by fireactions)
+                self.nixosModules.microvm-base
+                self.nixosModules.registry-cache
+                # Runner
                 self.nixosModules.fireactions
                 { disko.devices.disk.disk1.device = "/dev/vda"; }
                 ./deploy/configuration.nix

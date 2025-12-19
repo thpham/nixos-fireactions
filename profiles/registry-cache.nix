@@ -1,6 +1,6 @@
 # Registry Cache Profile
 #
-# Enables hybrid caching for Firecracker VMs:
+# Enables hybrid caching for Firecracker microVMs:
 # - Zot Registry: Pull-through cache for container registries (native OCI, no CA needed)
 # - Squid Proxy: HTTP/HTTPS caching with selective SSL bump
 #
@@ -13,13 +13,14 @@
 # - Multi-stage Docker builds work out of the box
 # - Optional HTTPS caching for configured domains via Squid SSL bump
 # - 50GB cache with LRU eviction (configurable)
+# - Works with any runner (fireactions, fireteact) via microvm-base bridges
 #
 # Usage:
 #   Add "registry-cache" tag to host in registry.json
 #
 # Customization:
 #   Override options in host-specific config (hosts/<name>.nix):
-#     services.fireactions.registryCache = {
+#     services.registry-cache = {
 #       storage.maxSize = "100GB";
 #       # Add private registry
 #       zot.mirrors."harbor.corp" = {
@@ -31,10 +32,10 @@
 { ... }:
 
 {
-  # Note: registry-cache module is now part of the fireactions module
-  # No separate import needed - just set the options
+  # Standalone registry-cache module
+  # Auto-detects networks from microvm-base.bridges
 
-  services.fireactions.registryCache = {
+  services.registry-cache = {
     enable = true;
 
     # Zot registry pull-through cache (default registries are already configured)

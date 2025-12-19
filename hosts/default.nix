@@ -96,6 +96,14 @@ let
         # Core modules (infrastructure)
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
+
+        # Foundation layer (shared bridges, containerd, DNSmasq, CNI)
+        self.nixosModules.microvm-base
+
+        # Standalone caching layer (works with any runner)
+        self.nixosModules.registry-cache
+
+        # Runner technologies
         self.nixosModules.fireactions
         self.nixosModules.fireteact
 
@@ -141,10 +149,13 @@ in
     nixpkgs = pkgs;
 
     # Per-node nixpkgs based on target system, with our overlay for custom packages
-    nodeNixpkgs = lib.mapAttrs (_name: hostDef: import nixpkgs {
-      system = hostDef.system;
-      overlays = [ self.overlays.default ];
-    }) registry;
+    nodeNixpkgs = lib.mapAttrs (
+      _name: hostDef:
+      import nixpkgs {
+        system = hostDef.system;
+        overlays = [ self.overlays.default ];
+      }
+    ) registry;
 
     specialArgs = { inherit self; };
   };

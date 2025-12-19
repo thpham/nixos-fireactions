@@ -56,7 +56,6 @@
   # Enable fireteact service for Gitea Actions
   services.fireteact = {
     enable = true;
-    kernelSource = "custom"; # Includes Docker bridge networking support
 
     # Gitea instance credentials
     # Secrets are defined above in sops.secrets

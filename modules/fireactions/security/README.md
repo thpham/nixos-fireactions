@@ -1,10 +1,38 @@
-# Firecracker Security Hardening Module
+# Fireactions Security Module
 
-This module provides comprehensive security hardening for the NixOS-based Firecracker runner infrastructure.
+Fireactions-specific security hardening for GitHub Actions runners using Firecracker microVMs.
+
+## Architecture
+
+Security is split between two layers:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              microvm-base.security (shared)                 │
+│  Host-level hardening that benefits ALL runner technologies │
+├─────────────────────────────────────────────────────────────┤
+│  - Kernel sysctls (kptr_restrict, dmesg_restrict, etc.)     │
+│  - SMT/Hyperthreading disable (Spectre mitigation)          │
+│  - LUKS encryption for containerd devmapper                 │
+│  - Tmpfs secrets mount                                      │
+│  - Secure deletion config for containerd                    │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│           fireactions.security (runner-specific)            │
+│  Fireactions-specific security features                     │
+├─────────────────────────────────────────────────────────────┤
+│  - Network isolation (VM-to-VM blocking, nftables)          │
+│  - Cloud metadata protection (169.254.169.254)              │
+│  - Systemd service hardening                                │
+│  - Secure snapshot cleanup timer                            │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Quick Start
 
-Enable the security-hardened profile in your host configuration:
+Enable the security-hardened profile (recommended):
 
 ```nix
 { ... }:
@@ -13,29 +41,38 @@ Enable the security-hardened profile in your host configuration:
 }
 ```
 
-Or enable individual features:
+Or configure manually:
 
 ```nix
 { ... }:
 {
+  # Shared host-level security (benefits all runners)
+  services.microvm-base.security = {
+    enable = true;
+    hardening.sysctls.enable = true;
+    storage = {
+      enable = true;
+      encryption.enable = true;
+      tmpfsSecrets.enable = true;
+    };
+  };
+
+  # Fireactions-specific security
   services.fireactions.security = {
     enable = true;
-
-    network.enable = true;      # VM-to-VM blocking
-    storage.enable = true;      # Secure deletion
-    hardening.sysctls.enable = true;  # Kernel hardening
-
-    # Optional: Maximum security
-    storage.encryption.enable = true;
-    hardening.disableHyperthreading = true;
+    network = {
+      enable = true;
+      blockVmToVm = true;
+      blockCloudMetadata = true;
+    };
+    storage.enable = true;
   };
 }
 ```
 
 ## Security Model
 
-Firecracker provides strong VM-level isolation via KVM virtualization. This is the primary
-security boundary - each GitHub Actions job runs in its own isolated virtual machine with:
+Firecracker's KVM-based VM isolation is the **primary security boundary**. Each GitHub Actions job runs in its own isolated virtual machine with:
 
 - Separate kernel instance
 - Isolated memory space
@@ -44,28 +81,34 @@ security boundary - each GitHub Actions job runs in its own isolated virtual mac
 
 This module adds defense-in-depth layers on top of Firecracker's VM isolation.
 
-> **Note:** The Firecracker jailer was considered but removed due to NixOS incompatibility.
-> NixOS binaries are dynamically linked and require `/nix/store` access, which conflicts
-> with the jailer's chroot model. The KVM-based VM isolation is sufficient for most use cases.
+> **Note:** The Firecracker jailer was evaluated but not implemented due to NixOS incompatibility. NixOS binaries are dynamically linked and require `/nix/store` access, which conflicts with the jailer's chroot model.
+
+## Module Structure
+
+```
+modules/fireactions/security/
+├── default.nix      # Entry point, services.fireactions.security.enable
+├── hardening.nix    # Systemd service isolation
+├── network.nix      # nftables rules for VM network isolation
+└── storage.nix      # Secure snapshot cleanup timer
+```
 
 ## Features
 
-### 1. Kernel Hardening (`hardening.nix`)
+### 1. Systemd Service Hardening (`hardening.nix`)
 
-Applies security-focused kernel sysctls:
+Applies enhanced isolation to the fireactions systemd service:
 
-| Sysctl                        | Value | Purpose                |
-| ----------------------------- | ----- | ---------------------- |
-| `kernel.dmesg_restrict`       | 1     | Restrict dmesg to root |
-| `kernel.kptr_restrict`        | 2     | Hide kernel pointers   |
-| `kernel.sysrq`                | 0     | Disable SysRq key      |
-| `net.ipv4.conf.all.rp_filter` | 1     | Anti-spoofing          |
-| `net.ipv4.tcp_syncookies`     | 1     | SYN flood protection   |
+| Setting                   | Purpose                          |
+| ------------------------- | -------------------------------- |
+| `SystemCallFilter`        | Allow only necessary syscalls    |
+| `MemoryDenyWriteExecute`  | Prevent code injection           |
+| `RestrictAddressFamilies` | Limit network protocols          |
+| `RestrictNamespaces`      | Limit namespace creation         |
+| `ProtectKernelTunables`   | Prevent kernel parameter changes |
 
 **Options:**
 
-- `hardening.sysctls.enable` (default: true)
-- `hardening.disableHyperthreading` (default: false) - Set true for Spectre mitigation
 - `hardening.systemdHardening.enable` (default: true)
 
 ### 2. Network Isolation (`network.nix`)
@@ -79,54 +122,70 @@ Implements nftables rules for VM segmentation:
 
 **Options:**
 
-- `network.enable` (default when security enabled)
-- `network.blockVmToVm` (default: true)
-- `network.blockCloudMetadata` (default: true)
-- `network.rateLimitConnections` (default: 100)
-- `network.allowedHostPorts` (default: [53, 67, 3128, 3129, 5000])
+| Option                         | Default                    | Purpose                  |
+| ------------------------------ | -------------------------- | ------------------------ |
+| `network.enable`               | false                      | Enable network isolation |
+| `network.blockVmToVm`          | true                       | Block VM-to-VM traffic   |
+| `network.blockCloudMetadata`   | true                       | Block cloud IMDS access  |
+| `network.rateLimitConnections` | 100                        | Max new conn/sec per VM  |
+| `network.allowedHostPorts`     | [53, 67, 3128, 3129, 5000] | TCP ports to gateway     |
+| `network.allowedHostUdpPorts`  | [53, 67]                   | UDP ports to gateway     |
+| `network.additionalRules`      | ""                         | Custom nftables rules    |
 
-### 3. Storage Security (`storage.nix`)
+### 3. Storage Cleanup (`storage.nix`)
 
-Provides data-at-rest protection:
+Provides secure cleanup of fireactions VM snapshots:
 
-- **LUKS encryption**: Full-disk encryption for the devmapper storage pool
-- **Ephemeral keys**: New encryption key generated at each boot (stored in tmpfs)
-- **Secure deletion**: TRIM/discard support for secure data removal
-- **Tmpfs secrets**: Dedicated tmpfs mount for sensitive runtime data
+- **Periodic cleanup timer**: Runs every 30 minutes
+- **Shutdown cleanup**: Secure deletion on system shutdown
+- **TRIM/discard or zero-fill**: Choice of deletion method
 
 **Options:**
 
-- `storage.enable`
-- `storage.encryption.enable` (default: true in security-hardened profile)
-- `storage.secureDelete.enable` (default: true)
-- `storage.secureDelete.method` ("discard" | "zero")
-- `storage.tmpfsSecrets.enable` (default: true)
+| Option                        | Default   | Purpose                    |
+| ----------------------------- | --------- | -------------------------- |
+| `storage.enable`              | false     | Enable storage cleanup     |
+| `storage.secureDelete.enable` | true      | Enable secure deletion     |
+| `storage.secureDelete.method` | "discard" | "discard" (TRIM) or "zero" |
 
-**Note:** Encryption always uses ephemeral keys - a new random key is generated at
-each boot and stored in tmpfs. This is ideal for Firecracker because:
+## Host-Level Security (microvm-base)
 
-- VMs are ephemeral by design (destroyed after job completion)
-- The devmapper thin-pool is recreated on each boot anyway
-- No key management complexity
-- Fresh encryption key on each boot = defense in depth
+The following security features are now in `microvm-base.security` and benefit all runner technologies (fireactions, fireteact, etc.):
+
+| Feature                | Option Path                                                      |
+| ---------------------- | ---------------------------------------------------------------- |
+| Kernel sysctls         | `services.microvm-base.security.hardening.sysctls.enable`        |
+| SMT/HT disable         | `services.microvm-base.security.hardening.disableHyperthreading` |
+| LUKS encryption        | `services.microvm-base.security.storage.encryption.enable`       |
+| Tmpfs secrets          | `services.microvm-base.security.storage.tmpfsSecrets.enable`     |
+| Secure deletion config | `services.microvm-base.security.storage.secureDelete.enable`     |
+
+See `modules/microvm-base/security/README.md` for details.
 
 ## Verification
 
-Run the verification script after deployment:
+Check nftables rules:
 
 ```bash
-./tests/verify-security.sh --verbose
+nft list table inet fireactions_isolation
 ```
 
-To test VM isolation (requires a running VM):
+Verify systemd hardening:
 
 ```bash
-./tests/verify-security.sh --vm-ip 10.200.0.2
+systemctl show fireactions --property=SystemCallFilter
+systemctl show fireactions --property=MemoryDenyWriteExecute
+```
+
+Check cleanup timer:
+
+```bash
+systemctl status fireactions-snapshot-cleanup.timer
 ```
 
 ## Security Recommendations
 
-### Minimum (Default Profile)
+### Minimum (security-hardened profile defaults)
 
 - Kernel sysctls hardening
 - VM-to-VM network isolation
@@ -137,13 +196,9 @@ To test VM isolation (requires a running VM):
 ### Maximum Security
 
 ```nix
-services.fireactions.security = {
-  enable = true;
-
-  hardening.disableHyperthreading = true;  # -50% vCPUs
-
-  storage.encryption.enable = true;  # Already enabled in security-hardened profile
-};
+{
+  services.microvm-base.security.hardening.disableHyperthreading = true;  # -50% vCPUs
+}
 ```
 
 ## Troubleshooting
@@ -158,40 +213,9 @@ nft list table inet fireactions_isolation
 
 Ensure established connections are allowed and the bridge interface is correct.
 
-### Storage encryption
+### Cleanup timer not running
 
-Encryption uses ephemeral keys by design - the key is generated at boot and stored
-in tmpfs (`/run/fireactions/secrets/storage.key`). This means:
-
-- **Data is lost on reboot** - this is intentional for ephemeral Firecracker VMs
-- **Key is destroyed on power loss** - tmpfs is RAM-backed
-- **No key management needed** - fresh key each boot
-
-If the devmapper pool fails to initialize:
-
-1. Check tmpfs secrets mount: `mount | grep /run/fireactions/secrets`
-2. Verify cryptsetup is available: `which cryptsetup`
-3. Check logs: `journalctl -u containerd-devmapper-setup -f`
-
-## Architecture
-
+```bash
+systemctl status fireactions-snapshot-cleanup.timer
+journalctl -u fireactions-snapshot-cleanup
 ```
-fireactions daemon
-    │
-    └── firecracker (KVM-isolated VM)
-            │
-            └── microVM
-                    │
-                    ├── [nftables] VM-to-VM block
-                    ├── [nftables] Metadata block
-                    └── [nftables] Rate limit
-```
-
-## Files
-
-| File            | Purpose                                    |
-| --------------- | ------------------------------------------ |
-| `default.nix`   | Module entry point, imports all submodules |
-| `hardening.nix` | Kernel sysctls and systemd hardening       |
-| `network.nix`   | nftables rules for VM isolation            |
-| `storage.nix`   | LUKS encryption and secure deletion        |

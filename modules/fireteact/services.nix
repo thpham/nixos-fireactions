@@ -1,11 +1,20 @@
 # Fireteact systemd services and system configuration
 #
 # This file contains:
-# - Boot configuration (kernel modules, sysctl)
-# - containerd integration (shared with fireactions)
+# - User/group configuration
 # - CNI configuration for fireteact network
 # - systemd services (fireteact, kernel setup, config injection)
-# - Network configuration (firewall, NAT)
+#
+# Delegated to microvm-base:
+# - Boot configuration (kernel modules, sysctl)
+# - containerd and devmapper setup
+# - Bridge creation via systemd-networkd
+# - DNSmasq configuration
+# - NAT configuration
+# - CNI plugins setup
+#
+# Delegated to registry-cache (standalone module):
+# - Zot/Squid caching services
 
 {
   config,
@@ -16,42 +25,16 @@
 
 let
   cfg = config.services.fireteact;
-  # Access fireactions registry cache config (shared infrastructure)
-  registryCacheCfg = config.services.fireactions.registryCache;
+  # Access standalone registry-cache module (no longer via fireactions)
+  registryCacheCfg = config.services.registry-cache;
+  # Access shared infrastructure from microvm-base
+  microvmBaseCfg = config.services.microvm-base;
 
-  # Calculate network values for DHCP configuration
-  subnetParts = lib.splitString "/" cfg.networking.subnet;
-  networkAddr = lib.head subnetParts;
-  subnetMask = lib.elemAt subnetParts 1;
-  networkOctets = lib.splitString "." networkAddr;
-  networkPrefix = "${lib.elemAt networkOctets 0}.${lib.elemAt networkOctets 1}.${lib.elemAt networkOctets 2}";
-  gateway = "${networkPrefix}.1";
+  # Kernel path from microvm-base (shared by all runner technologies)
+  kernelPath = microvmBaseCfg._internal.kernelPath;
 
-  # DHCP range (for /24 subnet: .2 to .254)
-  dhcpStart = "${networkPrefix}.2";
-  dhcpEnd = "${networkPrefix}.254";
-  netmask = if subnetMask == "24" then "255.255.255.0" else "255.255.255.0";
-
-  # Import kernel packages (shared with fireactions)
-  firecrackerKernelPkg = pkgs.callPackage ../../pkgs/firecracker-kernel.nix {
-    kernelVersion = cfg.kernelVersion;
-  };
-  firecrackerKernelCustomPkg = pkgs.callPackage ../../pkgs/firecracker-kernel-custom.nix { };
-  tcRedirectTapPkg = pkgs.callPackage ../../pkgs/tc-redirect-tap.nix { };
-
-  # Determine kernel path based on source
-  kernelPath =
-    if cfg.kernelSource == "upstream" then
-      "${firecrackerKernelPkg}/vmlinux"
-    else if cfg.kernelSource == "custom" then
-      "${firecrackerKernelCustomPkg}/vmlinux"
-    else if cfg.kernelSource == "nixpkgs" then
-      if pkgs.stdenv.hostPlatform.system == "x86_64-linux" then
-        "${cfg.kernelPackage.dev}/vmlinux"
-      else
-        "${cfg.kernelPackage.out}/${pkgs.stdenv.hostPlatform.linux-kernel.target}"
-    else
-      throw "Invalid kernelSource: ${cfg.kernelSource}";
+  # tc-redirect-tap from microvm-base
+  tcRedirectTapPkg = microvmBaseCfg._internal.tcRedirectTapPkg;
 
   # CNI configuration for fireteact (separate network from fireactions)
   cniConfig = {
@@ -75,6 +58,13 @@ let
   };
 
   cniConfigFile = pkgs.writeText "fireteact.conflist" (builtins.toJSON cniConfig);
+
+  # Calculate gateway for config injection
+  subnetParts = lib.splitString "/" cfg.networking.subnet;
+  networkAddr = lib.head subnetParts;
+  networkOctets = lib.splitString "." networkAddr;
+  networkPrefix = "${lib.elemAt networkOctets 0}.${lib.elemAt networkOctets 1}.${lib.elemAt networkOctets 2}";
+  gateway = "${networkPrefix}.1";
 
   # Generate fireteact config from NixOS options
   fireteactConfig = {
@@ -119,8 +109,7 @@ let
       };
     }) cfg.pools;
 
-    # containerd settings use sensible defaults, only override if needed
-    # Images are stored in per-pool namespaces (pool.name) for isolation
+    # containerd settings use sensible defaults
     containerd = {
       address = "/run/containerd/containerd.sock";
       snapshotter = "devmapper";
@@ -140,17 +129,16 @@ in
 {
   config = lib.mkIf cfg.enable {
     #
-    # Boot Configuration (may already be set by fireactions, use mkDefault)
+    # Register bridge with microvm-base (shared infrastructure)
     #
 
-    boot.kernelModules = lib.mkDefault [
-      "kvm-intel"
-      "kvm-amd"
-    ];
-
-    boot.kernel.sysctl = {
-      "net.ipv4.ip_forward" = lib.mkDefault 1;
-      "net.ipv4.conf.all.forwarding" = lib.mkDefault 1;
+    services.microvm-base = {
+      enable = true;
+      bridges.fireteact = {
+        bridgeName = cfg.networking.bridgeName;
+        subnet = cfg.networking.subnet;
+        externalInterface = cfg.networking.externalInterface;
+      };
     };
 
     #
@@ -167,29 +155,21 @@ in
 
     users.groups.${cfg.group} = lib.mkIf (cfg.group != "root") { };
 
-    services.udev.extraRules = lib.mkDefault ''
-      KERNEL=="kvm", GROUP="kvm", MODE="0660"
-    '';
-
     #
-    # containerd Configuration (shared with fireactions)
+    # containerd Registry Mirrors (when registry-cache is enabled)
     #
 
-    virtualisation.containerd = {
-      enable = true;
-      settings = {
-        version = 2;
-        plugins."io.containerd.grpc.v1.cri" = {
-          sandbox_image = "pause:3.9";
-        };
-        plugins."io.containerd.snapshotter.v1.devmapper" = {
-          root_path = "/var/lib/containerd/devmapper";
-          pool_name = "containerd-pool";
-          base_image_size = "10GB";
-          async_remove = true;
-        };
-      };
-    };
+    virtualisation.containerd.settings.plugins."io.containerd.grpc.v1.cri".registry.mirrors =
+      lib.mkIf (registryCacheCfg.enable && registryCacheCfg.zot.enable)
+        (
+          lib.mapAttrs' (
+            name: _mirror:
+            let
+              endpoint = "http://${registryCacheCfg._internal.primaryGateway}:${toString registryCacheCfg._internal.zotPort}";
+            in
+            lib.nameValuePair name { endpoint = [ endpoint ]; }
+          ) registryCacheCfg._internal.zotMirrors
+        );
 
     #
     # Required System Packages
@@ -230,32 +210,11 @@ in
       "d /etc/fireteact 0750 ${cfg.user} ${cfg.group} -"
       "d /run/fireteact 0750 ${cfg.user} ${cfg.group} -"
       "d /var/log/fireteact 0750 ${cfg.user} ${cfg.group} -"
-      "d /run/netns 0755 root root -"
-      "d /opt/cni/bin 0755 root root -"
-      "d /var/lib/cni 0755 root root -"
     ];
 
     #
     # Setup Services
     #
-
-    # CNI plugins setup (may already exist from fireactions)
-    systemd.services.cni-plugins-setup-fireteact = {
-      description = "Setup CNI plugins for fireteact";
-      wantedBy = [ "fireteact.service" ];
-      before = [ "fireteact.service" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
-      script = ''
-        mkdir -p /opt/cni/bin
-        for plugin in ${pkgs.cni-plugins}/bin/*; do
-          ln -sf "$plugin" /opt/cni/bin/
-        done
-        ln -sf ${tcRedirectTapPkg}/bin/tc-redirect-tap /opt/cni/bin/
-      '';
-    };
 
     # Kernel setup
     systemd.services.fireteact-kernel-setup = {
@@ -286,7 +245,6 @@ in
           || cfg.gitea.runnerOwnerFile != null
           || cfg.gitea.runnerRepoFile != null
           || cfg.debug.sshKeyFile != null;
-        # Also need config service if registry cache is enabled (for cloud-init user-data)
         needsRegistryCache = registryCacheCfg.enable;
         needsConfigService = cfg.configFile == null && (needsSecrets || needsRegistryCache);
       in
@@ -299,7 +257,9 @@ in
         restartTriggers = [ configFile ];
 
         # Wait for registry-cache CA to be generated (only if SSL bump is enabled)
-        after = lib.optional (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") "registry-cache-ca-setup.service";
+        after = lib.optional (
+          needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off"
+        ) "registry-cache-ca-setup.service";
 
         serviceConfig = {
           Type = "oneshot";
@@ -346,7 +306,6 @@ in
           ''}
 
           ${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") ''
-            # Verify the registry-cache CA cert exists (only needed for SSL bump)
             if [ ! -f "${registryCacheCfg._internal.caCertPath}" ]; then
               echo "ERROR: Registry cache CA certificate not found: ${registryCacheCfg._internal.caCertPath}"
               exit 1
@@ -370,22 +329,29 @@ in
             lib.optionalString (cfg.debug.sshKeyFile != null) cfg.debug.sshKeyFile
           }"
 
-          # Registry cache configuration (shared with fireactions)
-          # Fireteact VMs use their own gateway for DNS but share the registry cache
+          # Fireteact gateway for cloud-init
           export FIRETEACT_GATEWAY="${gateway}"
-          export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.gateway}"
+          export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.primaryGateway}"
 
           # Zot registry mirror configuration
           export ZOT_ENABLED="${lib.boolToString (needsRegistryCache && registryCacheCfg.zot.enable)}"
           export ZOT_PORT="${lib.optionalString needsRegistryCache (toString registryCacheCfg._internal.zotPort)}"
-          export ZOT_MIRRORS='${lib.optionalString needsRegistryCache (builtins.toJSON (
-            lib.mapAttrs (name: mirror: { url = mirror.url; }) registryCacheCfg._internal.zotMirrors
-          ))}'
+          export ZOT_MIRRORS='${
+            lib.optionalString needsRegistryCache (
+              builtins.toJSON (
+                lib.mapAttrs (name: mirror: { url = mirror.url; }) registryCacheCfg._internal.zotMirrors
+              )
+            )
+          }'
 
           # Squid SSL bump configuration
           export SQUID_SSL_BUMP_MODE="${lib.optionalString needsRegistryCache registryCacheCfg._internal.squidSslBumpMode}"
           export SQUID_SSL_BUMP_DOMAINS="${lib.optionalString needsRegistryCache (lib.concatStringsSep "," registryCacheCfg._internal.squidSslBumpDomains)}"
-          export SQUID_CA_FILE="${lib.optionalString (needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off") registryCacheCfg._internal.caCertPath}"
+          export SQUID_CA_FILE="${
+            lib.optionalString (
+              needsRegistryCache && registryCacheCfg._internal.squidSslBumpMode != "off"
+            ) registryCacheCfg._internal.caCertPath
+          }"
 
           ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
 
@@ -408,8 +374,8 @@ in
             || cfg.gitea.runnerOwnerFile != null
             || cfg.gitea.runnerRepoFile != null
             || cfg.debug.sshKeyFile != null
+            || registryCacheCfg.enable
           );
-        # Use runtime config if secrets need injection, otherwise static config
         effectiveConfigPath =
           if needsConfigService then
             "/run/fireteact/config.yaml"
@@ -426,11 +392,14 @@ in
           "containerd.service"
           "fireteact-kernel-setup.service"
         ]
-        ++ lib.optional needsConfigService "fireteact-config.service";
+        ++ lib.optional needsConfigService "fireteact-config.service"
+        ++ lib.optional (registryCacheCfg.enable && registryCacheCfg.zot.enable) "zot.service";
         requires = [ "containerd.service" ] ++ lib.optional needsConfigService "fireteact-config.service";
-        wants = [ "network-online.target" ];
+        wants = [
+          "network-online.target"
+        ]
+        ++ lib.optional (registryCacheCfg.enable && registryCacheCfg.zot.enable) "zot.service";
 
-        # Add required tools to PATH for CNI plugins
         path = [
           pkgs.firecracker
           pkgs.containerd
@@ -447,6 +416,7 @@ in
             tcRedirectTapPkg
           ];
           NETCONFPATH = "/etc/cni/conf.d";
+          HOME = cfg.dataDir;
         };
 
         serviceConfig = {
@@ -458,7 +428,7 @@ in
           RestartSec = "10s";
 
           # Security hardening
-          NoNewPrivileges = false; # Needs to spawn VMs
+          NoNewPrivileges = false;
           ProtectSystem = "strict";
           ProtectHome = true;
           PrivateTmp = true;
@@ -486,99 +456,6 @@ in
             "CAP_SETGID"
           ];
         };
-
-        environment = {
-          HOME = cfg.dataDir;
-        };
       };
-
-    #
-    # Network Configuration
-    #
-
-    # Create bridge interface for fireteact (separate from fireactions)
-    systemd.network.networks."50-fireteact-bridge" = {
-      matchConfig.Name = cfg.networking.bridgeName;
-      networkConfig = {
-        ConfigureWithoutCarrier = true;
-      };
-      # Assign gateway IP to the bridge (first IP in subnet)
-      # CNI expects the bridge to have the gateway IP for routing
-      address = [
-        (
-          let
-            # Parse subnet like "10.201.0.0/24" to get gateway "10.201.0.1/24"
-            parts = lib.splitString "/" cfg.networking.subnet;
-            network = lib.head parts;
-            prefix = lib.last parts;
-            octets = lib.splitString "." network;
-            gateway = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}.1/${prefix}";
-          in
-          gateway
-        )
-      ];
-      linkConfig.RequiredForOnline = "no";
-    };
-
-    systemd.network.netdevs."50-fireteact-bridge" = {
-      netdevConfig = {
-        Name = cfg.networking.bridgeName;
-        Kind = "bridge";
-      };
-    };
-
-    # NAT for fireteact subnet
-    # Use mkDefault to allow provider-specific overrides and merge with fireactions
-    networking.nat = {
-      enable = lib.mkDefault true;
-      internalInterfaces = [ cfg.networking.bridgeName ];
-      internalIPs = [ cfg.networking.subnet ];
-      externalInterface = lib.mkDefault cfg.networking.externalInterface;
-    };
-
-    # Firewall rules for fireteact
-    networking.firewall = {
-      # Allow traffic from fireteact VMs to internet
-      trustedInterfaces = [ cfg.networking.bridgeName ];
-    };
-
-    #
-    # DNSMASQ (DHCP + DNS for VMs)
-    #
-    # VMs use DHCP to get their IP address from dnsmasq running on the bridge
-    # Use lib.mkAfter for list settings to merge with fireactions' registry-cache dnsmasq config
-    services.dnsmasq = {
-      enable = true;
-      settings = {
-        # Add fireteact bridge interface (merges with fireactions' interface if both enabled)
-        interface = lib.mkAfter [ cfg.networking.bridgeName ];
-        bind-interfaces = true;
-
-        # DNS settings (only set if not already configured by fireactions)
-        no-resolv = lib.mkDefault true;
-        server = lib.mkDefault [
-          "8.8.8.8"
-          "1.1.1.1"
-        ];
-        cache-size = lib.mkDefault 1000;
-        log-queries = lib.mkDefault false;
-
-        # DHCP settings for fireteact subnet (merges with fireactions' dhcp-range)
-        # Use set: tag to scope this range, allowing per-subnet dhcp-options
-        dhcp-range = lib.mkAfter [ "set:fireteact,${dhcpStart},${dhcpEnd},${netmask},12h" ];
-        # Use tag: to scope options to fireteact subnet only
-        dhcp-option = lib.mkAfter [
-          "tag:fireteact,3,${gateway}" # Gateway for fireteact subnet
-          "tag:fireteact,6,${gateway}" # DNS server for fireteact subnet
-        ];
-        dhcp-rapid-commit = lib.mkDefault true;
-      };
-    };
-
-    # Ensure dnsmasq waits for the bridge interface to be created
-    systemd.services.dnsmasq = {
-      after = [ "sys-subsystem-net-devices-${cfg.networking.bridgeName}.device" ];
-      wants = [ "sys-subsystem-net-devices-${cfg.networking.bridgeName}.device" ];
-    };
   };
 }

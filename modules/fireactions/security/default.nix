@@ -1,9 +1,13 @@
-# Security hardening module for Firecracker microVM infrastructure
+# Security hardening module for fireactions runner
 #
-# This module provides defense-in-depth security for the fireactions runner:
-# - Kernel hardening (sysctls, boot parameters)
+# This module provides fireactions-specific security:
 # - Network isolation (VM-to-VM blocking, metadata protection)
-# - Storage security (encryption, secure deletion)
+# - Systemd service hardening
+# - Secure snapshot cleanup
+#
+# Host-level security (sysctls, LUKS encryption, SMT disable) is now
+# provided by the shared microvm-base.security module which benefits
+# all Firecracker-based runner technologies.
 #
 # Note: Firecracker's jailer was considered but removed due to NixOS
 # incompatibility (dynamic linking requires /nix/store in chroot).
@@ -15,7 +19,6 @@
 {
   config,
   lib,
-  pkgs,
   ...
 }:
 
@@ -32,28 +35,24 @@ in
 
   options.services.fireactions.security = {
     enable = lib.mkEnableOption ''
-      Security hardening for Firecracker microVMs.
+      Security hardening for fireactions runner.
 
-      This enables a comprehensive security layer including:
-      - Kernel hardening (restrictive sysctls)
+      This enables fireactions-specific security including:
       - Network isolation (VM-to-VM blocking)
-      - Storage security (secure deletion)
+      - Systemd service hardening
+      - Secure snapshot cleanup
+
+      Host-level security (sysctls, LUKS, SMT) is provided by
+      microvm-base.security, which is automatically enabled when
+      this option is enabled.
 
       Individual features can be fine-tuned via sub-options.
-      For maximum security, also enable:
-      - security.storage.encryption.enable (data-at-rest encryption)
-      - security.hardening.disableHyperthreading (Spectre mitigation)
     '';
   };
 
   config = lib.mkIf (fireactionsCfg.enable && cfg.enable) {
-    # Warnings for security considerations
-    warnings =
-      lib.optional (!cfg.hardening.disableHyperthreading) ''
-        Hyperthreading (SMT) is enabled. For maximum security against Spectre-class
-        attacks on shared infrastructure, consider setting:
-          services.fireactions.security.hardening.disableHyperthreading = true
-        Note: This reduces vCPU count by 50%.
-      '';
+    # Note: Host-level security (sysctls, LUKS, SMT) is now in microvm-base.security
+    # Enable it via: services.microvm-base.security.enable = true
+    # Or use the security-hardened profile which enables both
   };
 }

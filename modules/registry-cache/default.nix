@@ -1,17 +1,23 @@
-# Hybrid Registry and HTTP Cache for Fireactions
+# Standalone Registry and HTTP Cache for Firecracker microVMs
 #
 # This module provides:
 # 1. Zot Registry: Pull-through cache for container registries (native OCI protocol)
 # 2. Squid: HTTP/HTTPS caching proxy with selective SSL bump
 #
 # Architecture:
-# - Container registry traffic: VM → containerd hosts.toml → Zot → upstream registry
-# - HTTP/HTTPS traffic: VM → iptables REDIRECT → Squid → upstream
+# - Container registry traffic: VM -> containerd hosts.toml -> Zot -> upstream registry
+# - HTTP/HTTPS traffic: VM -> iptables REDIRECT -> Squid -> upstream
 #
-# Benefits:
-# - No CA certificates needed in containers for registry pulls (Zot uses native OCI)
-# - Multi-stage Docker builds work out of the box
-# - Optional HTTPS caching for configured domains via Squid SSL bump
+# This module is DECOUPLED from any specific runner technology (fireactions, fireteact, etc.)
+# It works with any bridges registered in microvm-base.
+#
+# Usage:
+#   services.registry-cache.enable = true;
+#   # Auto-detects bridges from microvm-base, or specify manually:
+#   services.registry-cache.networks = [
+#     { bridgeName = "fireteact0"; subnet = "10.201.0.0/24"; }
+#   ];
+
 {
   config,
   lib,
@@ -20,23 +26,57 @@
 }:
 
 let
-  cfg = config.services.fireactions.registryCache;
-  fireactionsCfg = config.services.fireactions;
+  cfg = config.services.registry-cache;
+  microvmBaseCfg = config.services.microvm-base;
 
-  # Calculate gateway IP from subnet (e.g., 10.200.0.0/24 -> 10.200.0.1)
-  subnetParts = lib.splitString "/" fireactionsCfg.networking.subnet;
-  networkAddr = lib.head subnetParts;
-  subnetMask = lib.elemAt subnetParts 1;
-  networkOctets = lib.splitString "." networkAddr;
-  networkPrefix = "${lib.elemAt networkOctets 0}.${lib.elemAt networkOctets 1}.${lib.elemAt networkOctets 2}";
-  gateway = "${networkPrefix}.1";
+  # Determine which networks to serve
+  # If networks is empty and useMicrovmBaseBridges is true, use all bridges from microvm-base
+  effectiveNetworks =
+    if cfg.networks != [ ] then
+      cfg.networks
+    else if cfg.useMicrovmBaseBridges && microvmBaseCfg.enable then
+      lib.mapAttrsToList (name: bridge: {
+        inherit (bridge) bridgeName subnet;
+        inherit name;
+      }) microvmBaseCfg.bridges
+    else
+      [ ];
 
-  # DHCP range (for /24 subnet: .2 to .254)
-  dhcpStart = "${networkPrefix}.2";
-  dhcpEnd = "${networkPrefix}.254";
-  netmask = if subnetMask == "24" then "255.255.255.0" else "255.255.255.0";
+  # Parse subnet to get network info
+  parseSubnet =
+    subnet:
+    let
+      parts = lib.splitString "/" subnet;
+      networkAddr = lib.head parts;
+      mask = lib.elemAt parts 1;
+      octets = lib.splitString "." networkAddr;
+      prefix = "${lib.elemAt octets 0}.${lib.elemAt octets 1}.${lib.elemAt octets 2}";
+    in
+    {
+      network = networkAddr;
+      mask = mask;
+      prefix = prefix;
+      gateway = "${prefix}.1";
+    };
 
-  # Parse storage size to MB for Squid (e.g., "50GB" -> 50000)
+  # Parse all networks with computed values
+  parsedNetworks = map (
+    net:
+    let
+      info = parseSubnet net.subnet;
+    in
+    net // info
+  ) effectiveNetworks;
+
+  # Use first network's gateway as primary (for Zot/Squid binding)
+  primaryNetwork = if parsedNetworks != [ ] then lib.head parsedNetworks else null;
+  primaryGateway = if primaryNetwork != null then primaryNetwork.gateway else "127.0.0.1";
+
+  # All subnets for ACLs
+  allSubnets = map (n: n.subnet) parsedNetworks;
+  allBridgeNames = map (n: n.bridgeName) parsedNetworks;
+
+  # Parse storage size to MB for Squid
   parseSizeToMB =
     sizeStr:
     let
@@ -69,9 +109,9 @@ let
     # ========================================
     # NETWORK CONFIGURATION
     # ========================================
-    http_port ${gateway}:3128 intercept
+    http_port ${primaryGateway}:3128 intercept
     ${lib.optionalString (cfg.squid.sslBump.mode != "off") ''
-      https_port ${gateway}:3129 intercept ssl-bump \
+      https_port ${primaryGateway}:3129 intercept ssl-bump \
         generate-host-certificates=on \
         dynamic_cert_mem_cache_size=512MB \
         cert=${caCertPath} \
@@ -81,7 +121,7 @@ let
     # DNS servers
     dns_nameservers ${lib.concatStringsSep " " cfg.dns.upstreamServers}
 
-    # Run as squid user (matches systemd service)
+    # Run as squid user
     cache_effective_user squid
     cache_effective_group squid
 
@@ -95,7 +135,7 @@ let
     # ========================================
     # ACCESS CONTROL
     # ========================================
-    acl localnet src ${fireactionsCfg.networking.subnet}
+    ${lib.concatMapStringsSep "\n" (subnet: "acl localnet src ${subnet}") allSubnets}
     acl SSL_ports port 443
     acl Safe_ports port 80 443
 
@@ -108,7 +148,7 @@ let
     ${
       if cfg.squid.sslBump.mode == "selective" && cfg.squid.sslBump.domains != [ ] then
         ''
-          # SELECTIVE MODE: Only bump configured domains, splice everything else
+          # SELECTIVE MODE: Only bump configured domains
           acl bump_domains ssl::server_name ${sslBumpDomainsAcl}
 
           acl step1 at_step SslBump1
@@ -123,12 +163,12 @@ let
         ''
       else if cfg.squid.sslBump.mode == "selective" then
         ''
-          # SELECTIVE MODE with no domains configured: splice all HTTPS (no MITM)
+          # SELECTIVE MODE with no domains: splice all HTTPS
           ssl_bump splice all
         ''
       else if cfg.squid.sslBump.mode == "all" then
         ''
-          # ALL MODE: Bump all HTTPS traffic (requires CA everywhere)
+          # ALL MODE: Bump all HTTPS traffic
           acl step1 at_step SslBump1
           acl step2 at_step SslBump2
           acl step3 at_step SslBump3
@@ -138,9 +178,7 @@ let
           ssl_bump bump step3
         ''
       else
-        ''
-          # HTTPS interception disabled
-        ''
+        "# HTTPS interception disabled"
     }
 
     # ========================================
@@ -157,7 +195,6 @@ let
     cache_replacement_policy lru
     memory_replacement_policy lru
 
-    # Default freshness
     refresh_pattern . 60 50% 1440
 
     # ========================================
@@ -166,18 +203,13 @@ let
     access_log stdio:${cfg.logging.accessLog}
     cache_log stdio:${cfg.logging.cacheLog}
 
-    # Required by systemd service
     pid_filename /run/squid.pid
     coredump_dir ${cfg.storage.cacheDir}/squid
   '';
 
   squidConfigFile = pkgs.writeText "squid.conf" squidConfig;
 
-  # Zot configuration JSON
-  # NOTE: docker.io uses NO destination prefix because:
-  # - BuildKit sends requests like /v2/library/alpine/... (no registry prefix)
-  # - Other registries (ghcr.io, etc.) use destination prefix since containerd
-  #   hosts.toml with override_path=true handles the path rewriting
+  # Zot configuration
   zotConfig = {
     distSpecVersion = "1.1.0";
     storage = {
@@ -204,9 +236,6 @@ let
                 prefix = mirror.prefix;
               }
               // lib.optionalAttrs (name != "docker.io") {
-                # Only add destination prefix for non-Docker Hub registries
-                # Docker Hub images are stored at root (e.g., /library/alpine)
-                # so BuildKit can access them without path rewriting
                 destination = "/${name}";
               }
             )
@@ -219,32 +248,6 @@ let
   };
 
   zotConfigFile = pkgs.writeText "zot-config.json" (builtins.toJSON zotConfig);
-
-  # Credential type for registry authentication
-  credentialType = lib.types.submodule {
-    options = {
-      username = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Username for registry authentication";
-      };
-      usernameFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "Path to file containing username";
-      };
-      password = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Password for registry authentication";
-      };
-      passwordFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "Path to file containing password";
-      };
-    };
-  };
 
   # Mirror type for Zot
   mirrorType = lib.types.submodule {
@@ -261,20 +264,64 @@ let
       onDemand = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Pull-through cache mode (fetch on first request)";
+        description = "Pull-through cache mode";
       };
-      credentials = lib.mkOption {
-        type = lib.types.nullOr credentialType;
-        default = null;
-        description = "Optional credentials for this registry";
+    };
+  };
+
+  # Network type for manual configuration
+  networkType = lib.types.submodule {
+    options = {
+      name = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Optional name for this network";
+      };
+      bridgeName = lib.mkOption {
+        type = lib.types.str;
+        description = "Bridge interface name";
+      };
+      subnet = lib.mkOption {
+        type = lib.types.str;
+        description = "Subnet in CIDR notation";
       };
     };
   };
 
 in
 {
-  options.services.fireactions.registryCache = {
-    enable = lib.mkEnableOption "registry and HTTP cache for Firecracker VMs";
+  imports = [
+    ./nat.nix
+  ];
+
+  options.services.registry-cache = {
+    enable = lib.mkEnableOption "registry and HTTP cache for microVMs";
+
+    # ========================================
+    # NETWORK CONFIGURATION
+    # ========================================
+    networks = lib.mkOption {
+      type = lib.types.listOf networkType;
+      default = [ ];
+      description = ''
+        Networks to serve with caching.
+        Leave empty to auto-detect from microvm-base.bridges.
+      '';
+      example = lib.literalExpression ''
+        [
+          { bridgeName = "fireteact0"; subnet = "10.201.0.0/24"; }
+        ]
+      '';
+    };
+
+    useMicrovmBaseBridges = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        When networks is empty, automatically use all bridges
+        registered in microvm-base.
+      '';
+    };
 
     # ========================================
     # ZOT REGISTRY OPTIONS
@@ -308,28 +355,12 @@ in
             url = "https://gcr.io";
           };
         };
-        description = ''
-          Container registries to mirror via Zot.
-          Each entry creates a namespace under the local registry.
-        '';
-        example = lib.literalExpression ''
-          {
-            "docker.io" = { url = "https://registry-1.docker.io"; };
-            "ghcr.io" = { url = "https://ghcr.io"; };
-            "harbor.corp" = {
-              url = "https://harbor.internal.corp";
-              credentials = {
-                usernameFile = config.sops.secrets.harbor-user.path;
-                passwordFile = config.sops.secrets.harbor-pass.path;
-              };
-            };
-          }
-        '';
+        description = "Container registries to mirror via Zot";
       };
     };
 
     # ========================================
-    # SQUID HTTP/HTTPS CACHE OPTIONS
+    # SQUID OPTIONS
     # ========================================
     squid = {
       enable = lib.mkOption {
@@ -346,45 +377,33 @@ in
             "off"
           ];
           default = "selective";
-          description = ''
-            SSL bump mode:
-            - "selective": Only MITM domains in 'domains' list (default, recommended)
-            - "all": MITM all HTTPS traffic (requires CA in all containers)
-            - "off": No HTTPS interception (HTTP caching only)
-          '';
+          description = "SSL bump mode";
         };
 
         domains = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [ ];
-          description = ''
-            Domains to SSL bump when mode="selective".
-            Leave empty to splice (passthrough) all HTTPS traffic.
-          '';
-          example = [
-            "internal.corp"
-            "cache.example.com"
-          ];
+          description = "Domains to SSL bump when mode=selective";
         };
       };
 
       memoryCache = lib.mkOption {
         type = lib.types.str;
         default = "256MB";
-        description = "Memory cache for hot objects";
+        description = "Memory cache size";
       };
 
       ca = {
         certFile = lib.mkOption {
           type = lib.types.nullOr lib.types.path;
           default = null;
-          description = "Path to CA certificate. Auto-generated if null.";
+          description = "CA certificate path (auto-generated if null)";
         };
 
         keyFile = lib.mkOption {
           type = lib.types.nullOr lib.types.path;
           default = null;
-          description = "Path to CA private key. Auto-generated if null.";
+          description = "CA key path (auto-generated if null)";
         };
 
         validDays = lib.mkOption {
@@ -416,13 +435,13 @@ in
       accessLog = lib.mkOption {
         type = lib.types.path;
         default = "/var/log/registry-cache/squid-access.log";
-        description = "Path to Squid access log";
+        description = "Squid access log path";
       };
 
       cacheLog = lib.mkOption {
         type = lib.types.path;
         default = "/var/log/registry-cache/squid-cache.log";
-        description = "Path to Squid cache log";
+        description = "Squid cache log path";
       };
     };
 
@@ -437,92 +456,86 @@ in
       };
     };
 
-    # Debug options
     debug = {
       sshKeyFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "SSH public key file for VM debugging access";
+        description = "SSH public key for VM debugging";
       };
     };
 
-    # Internal options (used by services.nix)
+    # ========================================
+    # INTERNAL OPTIONS (for downstream consumers)
+    # ========================================
     _internal = {
-      gateway = lib.mkOption {
+      networks = lib.mkOption {
+        type = lib.types.listOf lib.types.attrs;
+        internal = true;
+        readOnly = true;
+        default = parsedNetworks;
+        description = "Parsed network configurations";
+      };
+
+      primaryGateway = lib.mkOption {
         type = lib.types.str;
         internal = true;
-        default = gateway;
+        readOnly = true;
+        default = primaryGateway;
+        description = "Primary gateway IP for Zot/Squid";
       };
 
       zotPort = lib.mkOption {
         type = lib.types.port;
         internal = true;
+        readOnly = true;
         default = cfg.zot.port;
       };
 
       zotMirrors = lib.mkOption {
         type = lib.types.attrsOf mirrorType;
         internal = true;
+        readOnly = true;
         default = cfg.zot.mirrors;
       };
 
       caCertPath = lib.mkOption {
         type = lib.types.str;
         internal = true;
+        readOnly = true;
         default = caCertPath;
       };
 
       debugSshKeyFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         internal = true;
+        readOnly = true;
         default = cfg.debug.sshKeyFile;
       };
 
       squidSslBumpMode = lib.mkOption {
         type = lib.types.str;
         internal = true;
+        readOnly = true;
         default = cfg.squid.sslBump.mode;
       };
 
       squidSslBumpDomains = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         internal = true;
+        readOnly = true;
         default = cfg.squid.sslBump.domains;
       };
     };
   };
 
-  config = lib.mkIf (fireactionsCfg.enable && cfg.enable) {
-    # ========================================
-    # DNSMASQ (DHCP + DNS for VMs)
-    # ========================================
-    services.dnsmasq = {
-      enable = true;
-      settings = {
-        # Use list for interface so it can merge with fireteact's interface
-        interface = [ fireactionsCfg.networking.bridgeName ];
-        bind-interfaces = true;
-        no-resolv = true;
-        server = cfg.dns.upstreamServers;
-        cache-size = 1000;
-        log-queries = false;
-        # Use list for dhcp-range so it can merge with fireteact's range
-        # Use set: tag to scope this range, allowing per-subnet dhcp-options
-        dhcp-range = [ "set:fireactions,${dhcpStart},${dhcpEnd},${netmask},12h" ];
-        # Use tag: to scope options to fireactions subnet only
-        dhcp-option = [
-          "tag:fireactions,3,${gateway}" # Gateway for fireactions subnet
-          "tag:fireactions,6,${gateway}" # DNS server for fireactions subnet
-        ];
-        dhcp-rapid-commit = true;
-      };
-    };
-
-    # Ensure dnsmasq waits for the bridge interface to be created by systemd-networkd
-    systemd.services.dnsmasq = {
-      after = [ "sys-subsystem-net-devices-${fireactionsCfg.networking.bridgeName}.device" ];
-      wants = [ "sys-subsystem-net-devices-${fireactionsCfg.networking.bridgeName}.device" ];
-    };
+  config = lib.mkIf cfg.enable {
+    # Assertions
+    assertions = [
+      {
+        assertion = effectiveNetworks != [ ];
+        message = "registry-cache requires at least one network. Either set networks manually or enable microvm-base with bridges.";
+      }
+    ];
 
     # ========================================
     # DIRECTORY SETUP
@@ -553,7 +566,6 @@ in
         Restart = "on-failure";
         RestartSec = 5;
 
-        # Security hardening
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = true;
@@ -573,7 +585,7 @@ in
     # SQUID PROXY SERVICES
     # ========================================
 
-    # CA certificate generation (only if SSL bump is enabled)
+    # CA certificate generation
     systemd.services.registry-cache-ca-setup =
       lib.mkIf (cfg.squid.enable && cfg.squid.sslBump.mode != "off" && cfg.squid.ca.certFile == null)
         {
@@ -600,7 +612,7 @@ in
                 echo "CA certificate exists and is valid"
                 exit 0
               fi
-              echo "CA certificate expired or expiring soon, regenerating..."
+              echo "CA certificate expired, regenerating..."
             fi
 
             ${pkgs.openssl}/bin/openssl genrsa -out "$CA_KEY" 4096
@@ -608,7 +620,7 @@ in
               -days ${toString cfg.squid.ca.validDays} \
               -key "$CA_KEY" \
               -out "$CA_CERT" \
-              -subj "/CN=Fireactions Registry Cache CA" \
+              -subj "/CN=Registry Cache CA" \
               -addext "basicConstraints=critical,CA:TRUE" \
               -addext "keyUsage=critical,keyCertSign,cRLSign"
 
@@ -620,7 +632,7 @@ in
           '';
         };
 
-    # SSL database initialization (only if SSL bump is enabled)
+    # SSL database initialization
     systemd.services.registry-cache-ssl-db-setup =
       lib.mkIf (cfg.squid.enable && cfg.squid.sslBump.mode != "off")
         {
@@ -652,7 +664,7 @@ in
           '';
         };
 
-    # Main Squid service (follows NixOS native squid module pattern)
+    # Main Squid service
     systemd.services.registry-cache-squid = lib.mkIf cfg.squid.enable {
       description = "Squid HTTP/HTTPS Cache Proxy";
       documentation = [ "man:squid(8)" ];
@@ -664,20 +676,13 @@ in
         "registry-cache-ssl-db-setup.service"
       ];
 
-      # preStart runs as root (no User in serviceConfig)
-      # This allows proper directory creation and cache initialization
       preStart = ''
-        # Create log directory
         mkdir -p /var/log/registry-cache
         chown squid:squid /var/log/registry-cache
-
-        # Initialize cache directories if needed
         ${pkgs.squid}/bin/squid --foreground -z -f ${squidConfigFile}
       '';
 
       serviceConfig = {
-        # Note: No User/Group here - Squid starts as root and drops
-        # privileges via cache_effective_user in config
         PIDFile = "/run/squid.pid";
         ExecStart = "${pkgs.squid}/bin/squid --foreground -YCs -f ${squidConfigFile}";
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
@@ -700,75 +705,19 @@ in
     # ========================================
     # FIREWALL
     # ========================================
-    networking.firewall.interfaces.${fireactionsCfg.networking.bridgeName} = {
-      allowedTCPPorts =
-        (lib.optional cfg.zot.enable cfg.zot.port)
-        ++ (lib.optionals cfg.squid.enable [
-          3128
-          3129
-        ]);
-      allowedUDPPorts = [
-        53
-        67
-      ]; # DNS + DHCP
-    };
-
-    # ========================================
-    # NAT RULES FOR SQUID TRANSPARENT PROXY
-    # ========================================
-    # Use nftables when security module enables it, otherwise fallback to iptables
-    networking.nftables.tables.registry_cache_nat =
-      lib.mkIf (cfg.squid.enable && config.networking.nftables.enable)
-        {
-          family = "ip";
-          content = ''
-            chain prerouting {
-              type nat hook prerouting priority dstnat; policy accept;
-
-              # Redirect HTTP (80) to Squid intercept port (skip gateway traffic)
-              iifname "${fireactionsCfg.networking.bridgeName}" ip daddr != ${gateway} tcp dport 80 \
-                redirect to :3128
-
-              ${lib.optionalString (cfg.squid.sslBump.mode != "off") ''
-                # Redirect HTTPS (443) to Squid intercept port (for SSL bump)
-                iifname "${fireactionsCfg.networking.bridgeName}" ip daddr != ${gateway} tcp dport 443 \
-                  redirect to :3129
-              ''}
-            }
-          '';
-        };
-
-    # Fallback to iptables when nftables is not enabled
-    networking.nat = lib.mkIf (cfg.squid.enable && !config.networking.nftables.enable) {
-      enable = true;
-      internalInterfaces = [ fireactionsCfg.networking.bridgeName ];
-      extraCommands = ''
-        # Redirect HTTP (80) to Squid intercept port
-        iptables -t nat -A PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
-          -p tcp --dport 80 \
-          ! -d ${gateway} \
-          -j REDIRECT --to-port 3128
-        ${lib.optionalString (cfg.squid.sslBump.mode != "off") ''
-          # Redirect HTTPS (443) to Squid intercept port (for SSL bump)
-          iptables -t nat -A PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
-            -p tcp --dport 443 \
-            ! -d ${gateway} \
-            -j REDIRECT --to-port 3129
-        ''}
-      '';
-      extraStopCommands = ''
-        iptables -t nat -D PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
-          -p tcp --dport 80 \
-          ! -d ${gateway} \
-          -j REDIRECT --to-port 3128 2>/dev/null || true
-        ${lib.optionalString (cfg.squid.sslBump.mode != "off") ''
-          iptables -t nat -D PREROUTING -i ${fireactionsCfg.networking.bridgeName} \
-            -p tcp --dport 443 \
-            ! -d ${gateway} \
-            -j REDIRECT --to-port 3129 2>/dev/null || true
-        ''}
-      '';
-    };
+    networking.firewall.interfaces = lib.listToAttrs (
+      map (
+        net:
+        lib.nameValuePair net.bridgeName {
+          allowedTCPPorts =
+            (lib.optional cfg.zot.enable cfg.zot.port)
+            ++ (lib.optionals cfg.squid.enable [
+              3128
+              3129
+            ]);
+        }
+      ) parsedNetworks
+    );
 
     # ========================================
     # LOGROTATE

@@ -8,9 +8,10 @@
       "dev",
       "github-runners",
       "gitea-runners",
+      "fireactions-small",
+      "fireteact-small",
       "registry-cache",
-      "security-hardened",
-      "small"
+      "security-hardened"
     ]
   }
 }

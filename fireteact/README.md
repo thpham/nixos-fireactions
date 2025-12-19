@@ -185,13 +185,41 @@ repo     → Requires: Repository Admin or write:repository scope
 
 ## NixOS Integration
 
-Fireteact is designed for NixOS deployment via the `nixos-fireactions` flake:
+Fireteact is designed for NixOS deployment via the `nixos-fireactions` flake. It's part of a composable 4-layer architecture:
+
+1. **microvm-base** - Foundation (bridges, containerd, DNSmasq, CNI, **kernel configuration**)
+2. **registry-cache** - Optional OCI/HTTP caching
+3. **fireteact** - Gitea Actions runner management
+4. **profiles** - Tag-based configuration
+
+### Using Profiles (Recommended)
+
+Configure hosts via tags in `hosts/registry.json`:
+
+```nix
+# Example deployment tags:
+tags = ["gitea-runners", "fireteact-medium"]              # Gitea only
+tags = ["gitea-runners", "fireteact-large", "registry-cache"]  # With cache
+tags = ["github-runners", "gitea-runners", "fireactions-small", "fireteact-medium"]  # Both runners
+```
+
+Available size profiles:
+
+- `fireteact-small` - 1GB RAM, 1 vCPU, 2 max runners
+- `fireteact-medium` - 2GB RAM, 2 vCPU, 5 max runners
+- `fireteact-large` - 4GB RAM, 4 vCPU, 10 max runners
+
+### Direct Module Configuration
+
+For custom configurations, use the module directly:
 
 ```nix
 {
+  # Kernel configuration is at microvm-base layer (shared by all runners)
+  services.microvm-base.kernel.source = "custom";  # Includes Docker bridge networking
+
   services.fireteact = {
     enable = true;
-    kernelSource = "custom";  # Includes Docker bridge networking
 
     gitea = {
       instanceUrl = "https://gitea.example.com";
@@ -216,6 +244,15 @@ Fireteact is designed for NixOS deployment via the `nixos-fireactions` flake:
   };
 }
 ```
+
+### Architecture Isolation
+
+When fireteact is enabled, it automatically:
+
+- Registers a dedicated bridge (`fireteact0`) with `microvm-base`
+- Uses per-pool containerd namespaces for isolation
+- Configures DNSmasq for the fireteact subnet
+- Can optionally use `registry-cache` for image caching
 
 ## Development
 
