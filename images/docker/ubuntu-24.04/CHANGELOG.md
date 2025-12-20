@@ -10,6 +10,12 @@ Versioning format: `{runner_version}-{increment}` (e.g., `2.330.0-1` for GitHub,
 
 Initial release with new versioning scheme.
 
+#### Fixed
+
+- **MMDS route reliability**: Added `bootcmd` to create route to 169.254.169.254 before cloud-init
+  fetches metadata. Previously worked by timing luck; now deterministic per Firecracker docs:
+  "guest applications must insert a new rule into the routing table"
+
 #### Components
 
 | Component             | Version   |
@@ -32,6 +38,12 @@ Ephemeral runner mode for proper VM recycling.
 - **Immediate VM recycling**: New VMs spawn immediately after job completion (no 10s delay)
 - **Improved logging**: Structured logging for runner lifecycle events
 
+#### Fixed
+
+- **MMDS route reliability**: Added `bootcmd` to create route to 169.254.169.254 before cloud-init
+  fetches metadata. Previously worked by timing luck; now deterministic per Firecracker docs:
+  "guest applications must insert a new rule into the routing table"
+
 #### Components
 
 | Component  | Version   |
@@ -53,6 +65,13 @@ Initial release with GitLab CI runner support.
 - **Automatic cleanup**: DELETE /api/v4/runners/:id on VM exit
 - **Runner types**: Support for instance_type, group_type, and project_type
 - **Ephemeral runners**: One job per VM with immediate recycling
+
+#### Fixed
+
+- **MMDS route reliability**: Added `bootcmd` to create route to 169.254.169.254 before cloud-init
+  fetches metadata. This was the root cause of MMDS failures - fireglab boots faster than
+  fireteact/fireactions, causing cloud-init to run before the route existed. Now deterministic
+  per Firecracker docs: "guest applications must insert a new rule into the routing table"
 
 #### Components
 
