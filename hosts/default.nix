@@ -35,6 +35,7 @@ let
       # DigitalOcean uses ens3 as the external interface (not eth0)
       { services.fireactions.networking.externalInterface = "ens3"; }
       { services.fireteact.networking.externalInterface = "ens3"; }
+      { services.fireglab.networking.externalInterface = "ens3"; }
     ];
 
     # Hetzner Cloud/Dedicated
@@ -106,6 +107,7 @@ let
         # Runner technologies
         self.nixosModules.fireactions
         self.nixosModules.fireteact
+        self.nixosModules.fireglab
 
         # Disk layout config (generates fileSystems/boot.loader from disko)
         # Actual partitioning only happens during nixos-anywhere initial deploy

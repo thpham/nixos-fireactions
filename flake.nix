@@ -105,6 +105,7 @@
           lib.optionalAttrs isLinux {
             fireactions = pkgsWithOverlays.callPackage ./pkgs/fireactions.nix { };
             fireteact = pkgsWithOverlays.callPackage ./pkgs/fireteact.nix { };
+            fireglab = pkgsWithOverlays.callPackage ./pkgs/fireglab.nix { };
             firecracker-kernel = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel.nix { };
             firecracker-kernel-custom = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel-custom.nix { };
             tc-redirect-tap = pkgsWithOverlays.callPackage ./pkgs/tc-redirect-tap.nix { };
@@ -143,13 +144,14 @@
             ];
 
           shellHook = ''
-            echo "fireactions/fireteact development shell (${system})"
+            echo "fireactions/fireteact/fireglab development shell (${system})"
             echo ""
           ''
           + lib.optionalString isLinux ''
             echo "Package targets (native ${system}):"
             echo "  nix build .#fireactions               # GitHub Actions runner orchestrator"
             echo "  nix build .#fireteact                 # Gitea Actions runner orchestrator"
+            echo "  nix build .#fireglab                  # GitLab CI runner orchestrator"
             echo "  nix build .#firecracker-kernel        # Upstream minimal (no Docker bridge)"
             echo "  nix build .#firecracker-kernel-custom # Minimal + Docker bridge networking"
             echo "  nix build .#tc-redirect-tap"
@@ -190,6 +192,7 @@
         # Runner technologies
         fireactions = import ./modules/fireactions;
         fireteact = import ./modules/fireteact;
+        fireglab = import ./modules/fireglab;
 
         # Backwards compatibility aliases
         fireactions-node = self.nixosModules.fireactions;
@@ -200,6 +203,7 @@
       overlays.default = final: prev: {
         fireactions = final.callPackage ./pkgs/fireactions.nix { };
         fireteact = final.callPackage ./pkgs/fireteact.nix { };
+        fireglab = final.callPackage ./pkgs/fireglab.nix { };
         firecracker-kernel = final.callPackage ./pkgs/firecracker-kernel.nix { };
         firecracker-kernel-custom = final.callPackage ./pkgs/firecracker-kernel-custom.nix { };
         tc-redirect-tap = final.callPackage ./pkgs/tc-redirect-tap.nix { };

@@ -1,12 +1,14 @@
 # Multi-target Dockerfile for Firecracker VM runner images
 #
-# Supports two targets:
+# Supports three targets:
 #   - github-runner: GitHub Actions with fireactions agent
 #   - gitea-runner:  Gitea Actions with fireteact agent
+#   - gitlab-runner: GitLab CI with fireglab agent
 #
 # Build examples:
 #   docker build --target github-runner -t ghcr.io/thpham/fireactions-images/ubuntu-24.04-github:latest .
 #   docker build --target gitea-runner -t ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:latest .
+#   docker build --target gitlab-runner -t ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitlab:latest .
 
 # =============================================================================
 # Global ARGs - must be declared before any FROM statement
@@ -14,6 +16,7 @@
 
 ARG FIREACTIONS_VERSION=0.4.0
 ARG FIRETEACT_VERSION=latest
+ARG FIREGLAB_VERSION=latest
 
 # =============================================================================
 # Builder stages - fetch orchestrator binaries
@@ -24,6 +27,9 @@ FROM ghcr.io/hostinger/fireactions:${FIREACTIONS_VERSION} AS fireactions-bin
 
 # Gitea Actions orchestrator (built from this repo)
 FROM ghcr.io/thpham/fireteact:${FIRETEACT_VERSION} AS fireteact-bin
+
+# GitLab CI orchestrator (built from this repo)
+FROM ghcr.io/thpham/fireglab:${FIREGLAB_VERSION} AS fireglab-bin
 
 # =============================================================================
 # Base stage - common packages and configuration
@@ -224,3 +230,37 @@ COPY --from=fireteact-bin /usr/bin/fireteact /usr/bin/fireteact
 
 # Enable fireteact runner service
 RUN systemctl enable fireteact.service
+
+# =============================================================================
+# GitLab CI Runner target
+# =============================================================================
+
+FROM base AS gitlab-runner
+
+ARG GITLAB_RUNNER_VERSION="18.7.0"
+ARG TARGETARCH
+
+# Set root password for debug access
+RUN echo 'root:fireglab' | chpasswd
+
+# Install gitlab-runner
+RUN case "$TARGETARCH" in amd64|x86_64|i386) export RUNNER_ARCH="amd64";; arm64) export RUNNER_ARCH="arm64";; esac                              \
+    && mkdir -p /opt/gitlab-runner && cd /opt/gitlab-runner                                                                                      \
+    && curl -fLo gitlab-runner https://gitlab-runner-downloads.s3.amazonaws.com/v${GITLAB_RUNNER_VERSION}/binaries/gitlab-runner-linux-${RUNNER_ARCH} \
+    && chmod +x gitlab-runner                                                                                                                     \
+    && ln -s /opt/gitlab-runner/gitlab-runner /usr/local/bin/gitlab-runner                                                                       \
+    && chown -R runner:docker /opt/gitlab-runner
+
+# Install GitLab CLI (glab)
+RUN curl -fsSL https://raw.githubusercontent.com/upciti/wakemeops/main/assets/install_repository | bash \
+    && apt-get update && apt-get install --no-install-recommends -y glab \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy GitLab-specific overlay (hosts, cloud-init config, systemd service)
+COPY overlay/gitlab/etc /etc
+
+# Copy fireglab binary from GHCR image
+COPY --from=fireglab-bin /usr/bin/fireglab /usr/bin/fireglab
+
+# Enable fireglab runner service
+RUN systemctl enable fireglab.service

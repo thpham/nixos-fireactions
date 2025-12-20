@@ -15,7 +15,9 @@
 #   - GitHub + cache:           ["github-runners", "fireactions-medium", "registry-cache"]
 #   - Gitea Actions only:       ["gitea-runners", "fireteact-medium"]
 #   - Gitea + cache:            ["gitea-runners", "fireteact-medium", "registry-cache"]
-#   - Both runners:             ["github-runners", "gitea-runners", "fireactions-small", "fireteact-large"]
+#   - GitLab CI only:           ["gitlab-runners", "fireglab-medium"]
+#   - GitLab + cache:           ["gitlab-runners", "fireglab-medium", "registry-cache"]
+#   - All three runners:        ["github-runners", "gitea-runners", "gitlab-runners", "fireactions-small", "fireteact-small", "fireglab-small"]
 { lib }:
 
 let
@@ -28,6 +30,7 @@ let
     # Workload profiles (enable services and set credentials)
     github-runners = ./github-runners.nix;
     gitea-runners = ./gitea-runners.nix;
+    gitlab-runners = ./gitlab-runners.nix;
 
     # Technology-specific size profiles
     fireactions-small = ./fireactions-small.nix;
@@ -36,6 +39,9 @@ let
     fireteact-small = ./fireteact-small.nix;
     fireteact-medium = ./fireteact-medium.nix;
     fireteact-large = ./fireteact-large.nix;
+    fireglab-small = ./fireglab-small.nix;
+    fireglab-medium = ./fireglab-medium.nix;
+    fireglab-large = ./fireglab-large.nix;
 
     # Infrastructure profiles
     registry-cache = ./registry-cache.nix;
@@ -68,6 +74,9 @@ in
     "fireteact-small"
     "fireteact-medium"
     "fireteact-large"
+    "fireglab-small"
+    "fireglab-medium"
+    "fireglab-large"
   ];
 
 }

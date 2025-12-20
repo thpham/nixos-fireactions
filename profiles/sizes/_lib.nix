@@ -95,9 +95,41 @@ let
       };
     };
 
+  # Create a fireglab pool configuration
+  # Args:
+  #   size: "small" | "medium" | "large"
+  #   overrides: attrset to override defaults (tags, image, etc.)
+  mkFireglabPool =
+    size: overrides:
+    let
+      spec = sizeSpecs.${size};
+    in
+    {
+      name = overrides.name or "default";
+      maxRunners = overrides.maxRunners or spec.maxRunners;
+      minRunners = overrides.minRunners or spec.minRunners;
+      runner = {
+        imagePullPolicy = overrides.imagePullPolicy or "Always";
+        tags =
+          overrides.tags or [
+            "self-hosted"
+            "fireglab"
+            "linux"
+            size
+          ];
+      }
+      // lib.optionalAttrs (overrides ? image) {
+        image = overrides.image;
+      };
+      firecracker = {
+        memSizeMib = overrides.memSizeMib or spec.memSizeMib;
+        vcpuCount = overrides.vcpuCount or spec.vcpuCount;
+      };
+    };
+
 in
 {
-  inherit sizeSpecs mkFireactionsPool mkFireteactPool;
+  inherit sizeSpecs mkFireactionsPool mkFireteactPool mkFireglabPool;
 
   # Convenience accessors for size specs
   small = sizeSpecs.small;

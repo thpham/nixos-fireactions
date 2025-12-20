@@ -1,6 +1,6 @@
 # Ubuntu 24.04 Runner Images
 
-Multi-target base image for Firecracker VM runners, supporting both GitHub Actions and Gitea Actions.
+Multi-target base image for Firecracker VM runners, supporting GitHub Actions, Gitea Actions, and GitLab CI.
 
 ## Build Targets
 
@@ -8,6 +8,7 @@ Multi-target base image for Firecracker VM runners, supporting both GitHub Actio
 | --------------- | -------------- | ----------- | -------------- |
 | `github-runner` | GitHub Actions | fireactions | actions/runner |
 | `gitea-runner`  | Gitea Actions  | fireteact   | act_runner     |
+| `gitlab-runner` | GitLab CI      | fireglab    | gitlab-runner  |
 
 ## Image Contents (Shared Base)
 
@@ -28,6 +29,11 @@ Multi-target base image for Firecracker VM runners, supporting both GitHub Actio
 - **act_runner** (v0.2.11)
 - **fireteact** agent
 
+### GitLab Runner Target
+
+- **gitlab-runner** (v18.7.0)
+- **fireglab** agent
+
 ## Registry
 
 ```
@@ -38,6 +44,10 @@ ghcr.io/thpham/fireactions-images/ubuntu-24.04-github:<version>
 # Gitea Actions runner
 ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:latest
 ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitea:<version>
+
+# GitLab CI runner
+ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitlab:latest
+ghcr.io/thpham/fireactions-images/ubuntu-24.04-gitlab:<version>
 ```
 
 ## Building Locally
@@ -49,6 +59,9 @@ docker build --target github-runner -t ubuntu-24.04-github:latest .
 # Build Gitea runner image
 docker build --target gitea-runner -t ubuntu-24.04-gitea:latest .
 
+# Build GitLab runner image
+docker build --target gitlab-runner -t ubuntu-24.04-gitlab:latest .
+
 # Build with specific versions
 docker build --target github-runner \
   --build-arg RUNNER_VERSION=2.322.0 \
@@ -57,6 +70,10 @@ docker build --target github-runner \
 docker build --target gitea-runner \
   --build-arg ACT_RUNNER_VERSION=0.2.11 \
   -t ubuntu-24.04-gitea:latest .
+
+docker build --target gitlab-runner \
+  --build-arg GITLAB_RUNNER_VERSION=18.7.0 \
+  -t ubuntu-24.04-gitlab:latest .
 ```
 
 ## Versioning
@@ -76,6 +93,12 @@ Each target uses its runner binary version as the primary version component:
 - `0.2.11-1` - First release with act_runner 0.2.11
 - `0.2.11-2` - Second release (agent update, bug fix)
 - `0.2.12-1` - First release with act_runner 0.2.12
+
+**GitLab Runner** (gitlab-runner):
+
+- `18.7.0-1` - First release with gitlab-runner 18.7.0
+- `18.7.0-2` - Second release (agent update, bug fix)
+- `18.8.0-1` - First release with gitlab-runner 18.8.0
 
 ## Creating a Release
 
@@ -99,11 +122,15 @@ git push origin ubuntu-24.04-github/2.322.0-1
 # Gitea runner release
 git tag ubuntu-24.04-gitea/0.2.11-1
 git push origin ubuntu-24.04-gitea/0.2.11-1
+
+# GitLab runner release
+git tag ubuntu-24.04-gitlab/18.7.0-1
+git push origin ubuntu-24.04-gitlab/18.7.0-1
 ```
 
 ### Option 3: Push to Main
 
-Any changes to `images/docker/ubuntu-24.04/**` on the `main` branch will trigger builds for both targets with `latest` tag.
+Any changes to `images/docker/ubuntu-24.04/**` on the `main` branch will trigger builds for all targets with `latest` tag.
 
 ## Workflow Triggers
 
@@ -117,19 +144,21 @@ Any changes to `images/docker/ubuntu-24.04/**` on the `main` branch will trigger
 
 ### Bump Runner Version
 
-1. Edit `Dockerfile`: Update `ARG RUNNER_VERSION` or `ARG ACT_RUNNER_VERSION`
+1. Edit `Dockerfile`: Update `ARG RUNNER_VERSION`, `ARG ACT_RUNNER_VERSION`, or `ARG GITLAB_RUNNER_VERSION`
 2. Edit `CHANGELOG.md`: Add new version entry
 3. Create release tag with new runner version (resets increment):
    - GitHub: `ubuntu-24.04-github/2.323.0-1`
    - Gitea: `ubuntu-24.04-gitea/0.2.12-1`
+   - GitLab: `ubuntu-24.04-gitlab/18.8.0-1`
 
-### Bump Agent Version (fireactions/fireteact)
+### Bump Agent Version (fireactions/fireteact/fireglab)
 
-1. Edit `Dockerfile`: Update `ARG FIREACTIONS_VERSION` or `ARG FIRETEACT_VERSION`
+1. Edit `Dockerfile`: Update `ARG FIREACTIONS_VERSION`, `ARG FIRETEACT_VERSION`, or `ARG FIREGLAB_VERSION`
 2. Edit `CHANGELOG.md`: Add new version entry
 3. Create release tag with incremented suffix:
    - GitHub: `ubuntu-24.04-github/2.322.0-2`
    - Gitea: `ubuntu-24.04-gitea/0.2.11-2`
+   - GitLab: `ubuntu-24.04-gitlab/18.7.0-2`
 
 ## Architecture Support
 
@@ -161,13 +190,20 @@ ubuntu-24.04/
     │       │   └── 99-fireactions.cfg          # cloud-init MMDS config
     │       └── systemd/system/
     │           └── fireactions.service         # fireactions runner agent
-    └── gitea/              # Gitea Actions specific
+    ├── gitea/              # Gitea Actions specific
+    │   └── etc/
+    │       ├── hosts                           # Hostname (metadata.fireteact.internal)
+    │       ├── cloud/cloud.cfg.d/
+    │       │   └── 99-fireteact.cfg            # cloud-init MMDS config
+    │       └── systemd/system/
+    │           └── fireteact.service           # fireteact runner agent
+    └── gitlab/             # GitLab CI specific
         └── etc/
-            ├── hosts                           # Hostname (metadata.fireteact.internal)
+            ├── hosts                           # Hostname (metadata.fireglab.internal)
             ├── cloud/cloud.cfg.d/
-            │   └── 99-fireteact.cfg            # cloud-init MMDS config
+            │   └── 99-fireglab.cfg             # cloud-init MMDS config
             └── systemd/system/
-                └── fireteact.service           # fireteact runner agent
+                └── fireglab.service            # fireglab runner agent
 ```
 
 ## DNS Configuration
@@ -180,12 +216,12 @@ DNS is configured via cloud-init runcmd (resolv_conf module doesn't work with sy
 
 ## Comparison
 
-| Feature           | GitHub Runner                 | Gitea Runner                |
-| ----------------- | ----------------------------- | --------------------------- |
-| Platform          | GitHub Actions                | Gitea Actions               |
-| Runner binary     | actions/runner                | act_runner                  |
-| Agent binary      | fireactions                   | fireteact                   |
-| Auth method       | GitHub App (JIT config)       | API Token (registration)    |
-| Root password     | `fireactions`                 | `fireteact`                 |
-| Service           | fireactions.service           | fireteact.service           |
-| Metadata hostname | metadata.fireactions.internal | metadata.fireteact.internal |
+| Feature           | GitHub Runner                 | Gitea Runner                | GitLab Runner              |
+| ----------------- | ----------------------------- | --------------------------- | -------------------------- |
+| Platform          | GitHub Actions                | Gitea Actions               | GitLab CI                  |
+| Runner binary     | actions/runner                | act_runner                  | gitlab-runner              |
+| Agent binary      | fireactions                   | fireteact                   | fireglab                   |
+| Auth method       | GitHub App (JIT config)       | API Token (registration)    | PAT (glrt-\* token)        |
+| Root password     | `fireactions`                 | `fireteact`                 | `fireglab`                 |
+| Service           | fireactions.service           | fireteact.service           | fireglab.service           |
+| Metadata hostname | metadata.fireactions.internal | metadata.fireteact.internal | metadata.fireglab.internal |

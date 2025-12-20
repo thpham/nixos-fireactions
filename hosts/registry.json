@@ -8,8 +8,10 @@
       "dev",
       "github-runners",
       "gitea-runners",
+      "gitlab-runners",
       "fireactions-small",
       "fireteact-small",
+      "fireglab-small",
       "registry-cache",
       "security-hardened"
     ]
