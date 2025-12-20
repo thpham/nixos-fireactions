@@ -51,7 +51,7 @@ in
         # DHCP ranges with tags for each bridge
         dhcp-range = map (b: "set:${b.name},${b.dhcpStart},${b.dhcpEnd},${b.netmask},12h") bridgeConfigs;
 
-        # Per-bridge gateway and DNS options
+        # Per-bridge gateway, DNS, and route options
         dhcp-option = lib.flatten (
           map (b: [
             "tag:${b.name},3,${b.gateway}" # Gateway

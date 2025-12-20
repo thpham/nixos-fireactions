@@ -7,12 +7,31 @@
 { config, ... }:
 
 {
+  # Define sops secrets needed by fireactions
+  # These map to keys in your secrets/secrets.yaml file
+  sops.secrets = {
+    "github-app-id" = {
+      key = "github_app_id";
+      mode = "0400";
+      owner = "root";
+      group = "root";
+      restartUnits = [ "fireactions-config.service" ];
+    };
+
+    "github-app-key" = {
+      key = "github_app_private_key";
+      mode = "0400";
+      owner = "root";
+      group = "root";
+      restartUnits = [ "fireactions-config.service" ];
+    };
+  };
+
   # Enable fireactions service
   services.fireactions = {
     enable = true;
 
-    # GitHub App credentials (shared across all runners)
-    # Secrets are managed by sops-nix (see deploy/secrets.nix)
+    # GitHub App credentials
     github = {
       appIdFile = config.sops.secrets."github-app-id".path;
       appPrivateKeyFile = config.sops.secrets."github-app-key".path;

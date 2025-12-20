@@ -435,11 +435,8 @@ DELETE /api/v4/runners/:id
 
 ### Debug SSH Access
 
-Enable SSH access to VMs for debugging:
-
-```nix
-services.fireglab.debug.sshKeyFile = config.sops.secrets."debug-ssh-key".path;
-```
+SSH access to VMs is automatically enabled when using the `dev` profile (`profiles/dev.nix`).
+The debug SSH key is configured centrally for all runner types (fireactions, fireteact, fireglab).
 
 Then SSH into a running VM:
 

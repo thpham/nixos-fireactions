@@ -21,51 +21,25 @@
     };
 
     # Define secrets that will be decrypted to /run/secrets/
+    # Runner-specific secrets are defined in their respective profiles:
+    # - profiles/github-runners.nix (github-app-id, github-app-key)
+    # - profiles/gitlab-runners.nix (gitlab-access-token, gitlab-instance-url, etc.)
+    # - profiles/gitea-runners.nix (gitea-registration-token, gitea-instance-url, etc.)
     secrets = {
-      # GitHub App ID for fireactions
-      "github-app-id" = {
-        # Path in secrets.yaml: github_app_id
-        key = "github_app_id";
-
-        # Permissions
-        mode = "0400";
-        owner = "root";
-        group = "root";
-
-        # Restart fireactions when secret changes
-        restartUnits = [ "fireactions-config.service" ];
-      };
-
-      # GitHub App private key for fireactions
-      "github-app-key" = {
-        # Path in secrets.yaml: github_app_private_key
-        key = "github_app_private_key";
-
-        # Permissions
-        mode = "0400";
-        owner = "root";
-        group = "root";
-
-        # Restart fireactions when secret changes
-        restartUnits = [ "fireactions-config.service" ];
-      };
-
-      # Debug SSH key for VM access (optional, used by dev profile)
+      # Debug SSH key for VM access (used by dev profile for all runner types)
       "debug-ssh-key" = {
-        # Path in secrets.yaml: debug_ssh_key
         key = "debug_ssh_key";
-
-        # Permissions
         mode = "0400";
         owner = "root";
         group = "root";
-
-        # Restart fireactions-config to regenerate cloud-init user-data
-        restartUnits = [ "fireactions-config.service" ];
+        # Restart all config services to regenerate cloud-init user-data
+        restartUnits = [
+          "fireactions-config.service"
+          "fireteact-config.service"
+          "fireglab-config.service"
+        ];
       };
 
-      # Gitea secrets for fireteact are defined in modules/fireteact/default.nix
-      # They are conditional based on which *File options are used
     };
   };
 }

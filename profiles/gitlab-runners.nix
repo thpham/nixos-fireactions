@@ -26,15 +26,6 @@
       restartUnits = [ "fireglab-config.service" ];
     };
 
-    # Debug SSH key for VM access (optional but recommended)
-    "debug-ssh-key" = {
-      key = "debug_ssh_key";
-      mode = "0400";
-      owner = "root";
-      group = "root";
-      restartUnits = [ "fireglab-config.service" ];
-    };
-
     # Group ID for group_type runners (default runner type)
     "gitlab-group-id" = {
       key = "gitlab_group_id";
@@ -80,9 +71,6 @@
       # For project_type, uncomment and enable the project-id secret above:
       # projectIdFile = config.sops.secrets."gitlab-project-id".path;
     };
-
-    # Debug SSH key for VM access (allows SSH into running VMs for troubleshooting)
-    debug.sshKeyFile = config.sops.secrets."debug-ssh-key".path;
 
     # Example pool configuration (override per-host as needed)
     # pools = [{

@@ -17,6 +17,11 @@
     logLevel = lib.mkDefault "warn";
   };
 
+  # Fireglab dev settings (only if enabled)
+  services.fireglab = lib.mkIf config.services.fireglab.enable {
+    logLevel = lib.mkDefault "warn";
+  };
+
   # Stricter security for production
   services.openssh.settings = {
     PermitRootLogin = lib.mkForce "prohibit-password";

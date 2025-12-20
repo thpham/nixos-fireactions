@@ -459,14 +459,6 @@ in
       };
     };
 
-    debug = {
-      sshKeyFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "SSH public key for VM debugging";
-      };
-    };
-
     # ========================================
     # INTERNAL OPTIONS (for downstream consumers)
     # ========================================
@@ -506,13 +498,6 @@ in
         internal = true;
         readOnly = true;
         default = caCertPath;
-      };
-
-      debugSshKeyFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        internal = true;
-        readOnly = true;
-        default = cfg.debug.sshKeyFile;
       };
 
       squidSslBumpMode = lib.mkOption {

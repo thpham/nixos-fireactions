@@ -15,20 +15,20 @@
   services.fireactions = lib.mkIf config.services.fireactions.enable {
     logLevel = lib.mkDefault "debug";
     metricsEnable = lib.mkDefault true;
+    debug.sshKeyFile = config.sops.secrets."debug-ssh-key".path;
   };
 
   # Fireteact dev settings (only if enabled)
   services.fireteact = lib.mkIf config.services.fireteact.enable {
     logLevel = lib.mkDefault "debug";
-    # VM debug access - SSH key for debugging inside VMs
     debug.sshKeyFile = config.sops.secrets."debug-ssh-key".path;
   };
 
-  # Registry cache debug access (standalone module)
-  # Add your public SSH key to secrets/secrets.yaml under debug_ssh_key
-  services.registry-cache.debug.sshKeyFile =
-    lib.mkIf config.services.registry-cache.enable
-      config.sops.secrets."debug-ssh-key".path;
+  # Fireglab dev settings (only if enabled)
+  services.fireglab = lib.mkIf config.services.fireglab.enable {
+    logLevel = lib.mkDefault "debug";
+    debug.sshKeyFile = config.sops.secrets."debug-ssh-key".path;
+  };
 
   # More permissive SSH for development
   services.openssh.settings = {

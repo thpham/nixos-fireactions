@@ -102,7 +102,6 @@ let
   fireactionsConfig = {
     bind_address = cfg.bindAddress;
     log_level = cfg.logLevel;
-    debug = cfg.debug;
     basic_auth_enabled = cfg.basicAuth.enable;
   }
   // lib.optionalAttrs (cfg.basicAuth.enable && cfg.basicAuth.users != { }) {
@@ -349,9 +348,7 @@ in
           # Registry cache configuration
           export REGISTRY_CACHE_GATEWAY="${lib.optionalString needsRegistryCache registryCacheCfg._internal.primaryGateway}"
           export DEBUG_SSH_KEY_FILE="${
-            lib.optionalString (
-              needsRegistryCache && registryCacheCfg._internal.debugSshKeyFile != null
-            ) registryCacheCfg._internal.debugSshKeyFile
+            lib.optionalString (cfg.debug.sshKeyFile != null) cfg.debug.sshKeyFile
           }"
 
           # Zot registry mirror configuration

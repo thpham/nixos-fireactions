@@ -225,10 +225,13 @@ in
       description = "Log level for fireactions";
     };
 
-    debug = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = "Enable debug mode";
+    # Debug configuration (matches fireteact/fireglab structure)
+    debug = {
+      sshKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "SSH public key file for VM debugging access";
+      };
     };
 
     # Metrics configuration
