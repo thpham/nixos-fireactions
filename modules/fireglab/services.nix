@@ -353,7 +353,7 @@ in
             ) registryCacheCfg._internal.caCertPath
           }"
 
-          ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
+          ${pkgs.python3.withPackages (ps: [ ps.ruamel-yaml ])}/bin/python3 ${./inject-secrets.py}
 
           chown ${cfg.user}:${cfg.group} /run/fireglab/config.yaml
           chmod 0640 /run/fireglab/config.yaml
@@ -426,6 +426,10 @@ in
           ExecStart = "${cfg.package}/bin/fireglab serve --config ${effectiveConfigPath}";
           Restart = "always";
           RestartSec = "10s";
+
+          # OOM protection - critical infrastructure service
+          OOMScoreAdjust = -900;
+          OOMPolicy = "continue";
 
           # Security hardening
           NoNewPrivileges = false;

@@ -371,7 +371,7 @@ in
             ) registryCacheCfg._internal.caCertPath
           }"
 
-          ${pkgs.python3.withPackages (ps: [ ps.pyyaml ])}/bin/python3 ${./inject-secrets.py}
+          ${pkgs.python3.withPackages (ps: [ ps.ruamel-yaml ])}/bin/python3 ${./inject-secrets.py}
 
           # Set proper permissions
           chown ${cfg.user}:${cfg.group} /run/fireactions/config.yaml
@@ -445,6 +445,10 @@ in
 
           # Working directory
           WorkingDirectory = cfg.dataDir;
+
+          # OOM protection - critical infrastructure service
+          OOMScoreAdjust = -900;
+          OOMPolicy = "continue";
 
           #
           # Security hardening (built-in, always enabled)

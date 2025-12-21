@@ -158,6 +158,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy common overlay files (network, docker service drop-in)
 COPY overlay/common/etc /etc
 
+# Enable systemd-resolved for DNS caching (without systemctl during build)
+# DNS servers are obtained via DHCP when using systemd-networkd (UseDNS=yes)
+RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
+    && ln -sf /lib/systemd/system/systemd-resolved.service \
+              /etc/systemd/system/multi-user.target.wants/systemd-resolved.service
+
+# Configure resolv.conf symlink at runtime (cannot modify during build - Docker bind-mount)
+# This oneshot service runs before systemd-resolved and sets up the stub resolver symlink
+RUN printf '[Unit]\n\
+Description=Setup resolv.conf symlink for systemd-resolved\n\
+DefaultDependencies=no\n\
+Before=systemd-resolved.service\n\
+Before=network.target\n\
+\n\
+[Service]\n\
+Type=oneshot\n\
+RemainAfterExit=yes\n\
+ExecStart=/bin/sh -c "rm -f /etc/resolv.conf && ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf"\n\
+\n\
+[Install]\n\
+WantedBy=sysinit.target\n' > /etc/systemd/system/resolv-conf-symlink.service \
+    && mkdir -p /etc/systemd/system/sysinit.target.wants \
+    && ln -sf /etc/systemd/system/resolv-conf-symlink.service \
+              /etc/systemd/system/sysinit.target.wants/resolv-conf-symlink.service
+
+# Harden systemd-resolved for Firecracker VMs (disable unused features)
+RUN mkdir -p /etc/systemd/resolved.conf.d \
+    && printf '[Resolve]\nLLMNR=no\nMulticastDNS=no\nDNSSEC=no\nDNSOverTLS=no\n' \
+      > /etc/systemd/resolved.conf.d/firecracker.conf
+
 # Enable cloud-init services (runs before Docker starts)
 RUN systemctl enable cloud-init-local.service \
     cloud-init.service \
@@ -249,7 +279,9 @@ RUN case "$TARGETARCH" in amd64|x86_64|i386) export RUNNER_ARCH="amd64";; arm64)
     && curl -fLo gitlab-runner https://gitlab-runner-downloads.s3.amazonaws.com/v${GITLAB_RUNNER_VERSION}/binaries/gitlab-runner-linux-${RUNNER_ARCH} \
     && chmod +x gitlab-runner                                                                                                                     \
     && ln -s /opt/gitlab-runner/gitlab-runner /usr/local/bin/gitlab-runner                                                                       \
-    && chown -R runner:docker /opt/gitlab-runner
+    && chown -R runner:docker /opt/gitlab-runner                                                                                                 \
+    && mkdir -p /etc/gitlab-runner                                                                                                               \
+    && chown -R runner:docker /etc/gitlab-runner
 
 # Install GitLab CLI (glab)
 RUN curl -fsSL https://raw.githubusercontent.com/upciti/wakemeops/main/assets/install_repository | bash \

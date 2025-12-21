@@ -11,7 +11,8 @@ Handles:
 - Squid SSL bump CA certificate (only when needed)
 - Debug SSH key injection
 """
-import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import LiteralScalarString
 import os
 import json
 
@@ -25,18 +26,14 @@ def read_secret_file(env_var):
     return None
 
 
-# Custom representer for multi-line strings (block scalar style)
-def str_representer(dumper, data):
-    if "\n" in data:
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
-
-
-yaml.add_representer(str, str_representer)
+# Initialize ruamel.yaml with round-trip mode for proper formatting
+yaml = YAML()
+yaml.preserve_quotes = True
+yaml.default_flow_style = False
 
 # Read the base config
 with open("/etc/fireglab/config.yaml", "r") as f:
-    config = yaml.safe_load(f)
+    config = yaml.load(f)
 
 # Inject GitLab secrets from files
 if "gitlab" in config:
@@ -299,13 +296,9 @@ if "pools" in config:
                 "    fi",
             ])
 
-    # DNS configuration
-    # Use fireglab gateway for DNS (10.202.0.1) which forwards to main dnsmasq
-    if fireglab_gateway:
-        user_data_lines.extend([
-            "  # Set DNS to use fireglab gateway (centralized DNS via dnsmasq)",
-            f"  - echo 'nameserver {fireglab_gateway}' > /etc/resolv.conf",
-        ])
+    # Note: DNS is automatically configured via DHCP (dnsmasq provides option 6)
+    # systemd-networkd accepts DNS from DHCP (UseDNS=yes in 10-eth0.network)
+    # systemd-resolved caches and forwards to the gateway
 
     # Hostname from MMDS
     user_data_lines.extend([
@@ -317,7 +310,7 @@ if "pools" in config:
         "    fi",
     ])
 
-    user_data = '\n'.join(user_data_lines) + '\n'
+    user_data = LiteralScalarString('\n'.join(user_data_lines) + '\n')
 
     # Inject user-data into all pools
     for pool in config["pools"]:
@@ -329,6 +322,6 @@ if "pools" in config:
 # Write the modified config
 os.makedirs("/run/fireglab", exist_ok=True)
 with open("/run/fireglab/config.yaml", "w") as f:
-    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    yaml.dump(config, f)
 
 print("fireglab config generated at /run/fireglab/config.yaml")

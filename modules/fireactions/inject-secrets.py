@@ -9,21 +9,19 @@ Handles:
 - Squid SSL bump CA certificate (only when needed)
 - Debug SSH key injection
 """
-import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import LiteralScalarString
 import os
 import json
 
-# Custom representer for multi-line strings (block scalar style)
-def str_representer(dumper, data):
-    if "\n" in data:
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
-
-yaml.add_representer(str, str_representer)
+# Initialize ruamel.yaml with round-trip mode for proper formatting
+yaml = YAML()
+yaml.preserve_quotes = True
+yaml.default_flow_style = False
 
 # Read the base config
 with open("/etc/fireactions/config.yaml", "r") as f:
-    config = yaml.safe_load(f)
+    config = yaml.load(f)
 
 # Inject GitHub secrets from files
 if "github" in config:
@@ -35,7 +33,7 @@ if "github" in config:
     private_key_file = os.environ.get("PRIVATE_KEY_FILE", "")
     if private_key_file:
         with open(private_key_file, "r") as f:
-            config["github"]["app_private_key"] = f.read()
+            config["github"]["app_private_key"] = LiteralScalarString(f.read())
 
 # Inject metadata into all pools
 if "pools" in config:
@@ -265,12 +263,9 @@ if (zot_enabled or gateway) and "pools" in config:
             "    fi",
         ])
 
-    # DNS configuration (always, if gateway is set)
-    if gateway:
-        user_data_lines.extend([
-            "  # Set DNS to use host gateway (centralized DNS via dnsmasq)",
-            f"  - echo 'nameserver {gateway}' > /etc/resolv.conf",
-        ])
+    # Note: DNS is automatically configured via DHCP (dnsmasq provides option 6)
+    # systemd-networkd accepts DNS from DHCP (UseDNS=yes in 10-eth0.network)
+    # systemd-resolved caches and forwards to the gateway
 
     # Hostname from MMDS
     user_data_lines.extend([
@@ -282,7 +277,7 @@ if (zot_enabled or gateway) and "pools" in config:
         "    fi",
     ])
 
-    user_data = '\n'.join(user_data_lines) + '\n'
+    user_data = LiteralScalarString('\n'.join(user_data_lines) + '\n')
 
     # Inject user-data into all pools (firecracker/metadata already initialized above)
     for pool in config["pools"]:
@@ -293,6 +288,6 @@ if (zot_enabled or gateway) and "pools" in config:
 
 # Write the final config
 with open("/run/fireactions/config.yaml", "w") as f:
-    yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    yaml.dump(config, f)
 
 print("Config with secrets written to /run/fireactions/config.yaml")
