@@ -127,8 +127,25 @@ func New(opts ...Option) *Runner {
 	return r
 }
 
+// IsRegistered checks if the runner is already registered by checking for the .runner file.
+func (r *Runner) IsRegistered() bool {
+	info, err := os.Stat(r.runnerFile)
+	if err != nil {
+		return false
+	}
+	// Check that file is not empty (valid registration)
+	return info.Size() > 0
+}
+
 // Register registers the runner with Gitea using the provided metadata.
+// If the runner is already registered (valid .runner file exists), registration is skipped.
 func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
+	// Check if already registered - allows safe restart without creating duplicates
+	if r.IsRegistered() {
+		r.log.WithField("runner_file", r.runnerFile).Info("Runner already registered, skipping registration")
+		return nil
+	}
+
 	r.log.WithFields(logrus.Fields{
 		"instance":    metadata.GiteaInstanceURL,
 		"runner_name": metadata.RunnerName,
@@ -141,11 +158,11 @@ func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
 	}
 
 	// Build registration command
-	// Use --ephemeral to auto-deregister from Gitea after one job
+	// Note: NOT using --ephemeral so runner persists across service restarts
+	// Host-side cleanup (pool.Stop) handles deregistration when VM is destroyed
 	args := []string{
 		"register",
 		"--no-interactive",
-		"--ephemeral",
 		"--instance", metadata.GiteaInstanceURL,
 		"--token", metadata.RegistrationToken,
 		"--name", metadata.RunnerName,
@@ -180,7 +197,7 @@ func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
 // This should be called after Register.
 // The daemon runs with --once flag to exit after completing one job.
 func (r *Runner) Run(ctx context.Context) error {
-	r.log.Info("Starting act_runner daemon (ephemeral mode)")
+	r.log.Info("Starting act_runner daemon")
 
 	// Use --once to exit after completing one job
 	args := []string{"daemon", "--once"}
@@ -343,8 +360,9 @@ container:
 }
 
 // Cleanup removes runner registration files.
+// Note: Deregistration from Gitea is handled by the host (pool.Stop via DeleteRunnerByName)
+// when the VM is destroyed. This just cleans up local state.
 func (r *Runner) Cleanup() error {
-	// Remove runner file (deregistration happens automatically when runner disconnects)
 	if err := os.Remove(r.runnerFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove runner file: %w", err)
 	}

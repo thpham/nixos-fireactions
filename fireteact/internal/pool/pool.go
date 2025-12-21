@@ -137,7 +137,7 @@ func (p *Pool) Start(ctx context.Context) error {
 
 // Stop gracefully stops the pool and all runners.
 // This includes unregistering active runners from Gitea and destroying VMs.
-// Runners that already completed (ephemeral mode) are auto-deregistered by Gitea.
+// Runners that already completed are deregistered by monitorRunner, so we skip them here.
 func (p *Pool) Stop() error {
 	p.cancel()
 	if p.scaleTicker != nil {
@@ -154,7 +154,7 @@ func (p *Pool) Stop() error {
 	defer cancel()
 
 	for id, runner := range p.runners {
-		// Skip runners that already completed - ephemeral runners auto-deregister from Gitea
+		// Skip runners that already completed - monitorRunner already deregistered them from Gitea
 		if runner.Status == RunnerStateStopped || runner.Status == RunnerStateFailed {
 			p.log.Debugf("Skipping cleanup for completed runner %s (status: %s)", id, runner.Status)
 			continue
@@ -162,7 +162,7 @@ func (p *Pool) Stop() error {
 
 		// For active runners, try to unregister from Gitea
 		// This prevents the runner from showing as offline in Gitea UI
-		if runner.Name != "" && runner.Status != RunnerStateStopped {
+		if runner.Name != "" {
 			p.log.Infof("Unregistering active runner %s from Gitea", runner.Name)
 			if err := p.gitea.DeleteRunnerByName(shutdownCtx, runner.Name); err != nil {
 				p.log.Warnf("Failed to unregister runner %s from Gitea: %v", runner.Name, err)
@@ -315,7 +315,7 @@ func (p *Pool) checkAndScale() {
 				"pool":            p.cfg.Name,
 				"stopped_runners": stoppedCount,
 				"spawning":        runnersToSpawn,
-			}).Info("Spawning replacement runners for completed ephemeral runners")
+			}).Info("Spawning replacement runners for completed runners")
 		}
 
 		for i := 0; i < runnersToSpawn; i++ {
@@ -473,14 +473,28 @@ func (p *Pool) updateRunnerStatus(runnerID string, status RunnerState, vmID, ipA
 	}
 }
 
+// getRunnerName returns the name of a runner by ID.
+func (p *Pool) getRunnerName(runnerID string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if runner, ok := p.runners[runnerID]; ok {
+		return runner.Name
+	}
+	return ""
+}
+
 // monitorRunner watches a runner VM and cleans up when it exits.
-// When a job completes, the ephemeral act_runner exits, causing the VM to terminate.
-// This triggers cleanup and the scaling loop will spawn a replacement runner.
+// When a job completes, act_runner (with --once flag) exits, causing the VM to terminate.
+// This triggers cleanup including Gitea deregistration, and the scaling loop spawns a replacement.
 func (p *Pool) monitorRunner(runnerID, vmID string, startTime time.Time) {
-	// Wait for VM to exit - act_runner in ephemeral mode exits after completing a job
+	// Wait for VM to exit - act_runner with --once flag exits after completing a job
 	err := p.vmManager.WaitForExit(p.ctx, vmID)
 
 	lifetime := time.Since(startTime)
+
+	// Get runner name for Gitea cleanup before updating status
+	runnerName := p.getRunnerName(runnerID)
 
 	if err != nil && p.ctx.Err() == nil {
 		p.log.WithFields(logrus.Fields{
@@ -500,7 +514,19 @@ func (p *Pool) monitorRunner(runnerID, vmID string, startTime time.Time) {
 			"runner_id": runnerID,
 			"vm_id":     vmID,
 			"lifetime":  lifetime.Round(time.Second),
-		}).Info("Runner completed job and exited (ephemeral mode)")
+		}).Info("Runner completed job and exited")
+	}
+
+	// Deregister runner from Gitea (not using --ephemeral, so manual cleanup required)
+	// Skip if shutting down - Stop() handles cleanup for active runners
+	if p.ctx.Err() == nil && runnerName != "" {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := p.gitea.DeleteRunnerByName(cleanupCtx, runnerName); err != nil {
+			p.log.Warnf("Failed to deregister runner %s from Gitea: %v", runnerName, err)
+		} else {
+			p.log.Infof("Deregistered runner %s from Gitea", runnerName)
+		}
 	}
 
 	// Record VM lifetime

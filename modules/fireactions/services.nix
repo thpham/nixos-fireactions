@@ -249,7 +249,7 @@ in
     # Directory Setup
     #
 
-    # Create required directories
+    # Create required directories and cleanup rules
     systemd.tmpfiles.rules = [
       "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/kernels 0750 ${cfg.user} ${cfg.group} -"
@@ -258,6 +258,12 @@ in
       "d /etc/fireactions 0750 ${cfg.user} ${cfg.group} -"
       "d /run/fireactions 0750 ${cfg.user} ${cfg.group} -"
       "d /var/log/fireactions 0750 ${cfg.user} ${cfg.group} -"
+
+      # Cleanup stale socket files on boot (VMs that didn't shut down cleanly)
+      "r ${cfg.dataDir}/pools/*/*.sock - - - - -"
+
+      # Remove VM log files older than 1 day
+      "e ${cfg.dataDir}/pools/*/runner-*.log - - - 1d -"
     ];
 
     #
@@ -442,6 +448,12 @@ in
               "${cfg.package}/bin/fireactions server --config /etc/fireactions/config.yaml";
           Restart = "on-failure";
           RestartSec = 5;
+
+          # Allow enough time for graceful shutdown (runner unregistration from GitHub API)
+          TimeoutStopSec = "60s";
+
+          # Cleanup stale socket files when service stops
+          ExecStopPost = "${pkgs.findutils}/bin/find ${cfg.dataDir}/pools -name '*.sock' -delete";
 
           # Working directory
           WorkingDirectory = cfg.dataDir;

@@ -203,6 +203,7 @@ in
     # Directory Setup
     #
 
+    # Create required directories and cleanup rules
     systemd.tmpfiles.rules = [
       "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/kernels 0750 ${cfg.user} ${cfg.group} -"
@@ -210,6 +211,12 @@ in
       "d /etc/fireglab 0750 ${cfg.user} ${cfg.group} -"
       "d /run/fireglab 0750 ${cfg.user} ${cfg.group} -"
       "d /var/log/fireglab 0750 ${cfg.user} ${cfg.group} -"
+
+      # Cleanup stale socket files on boot (VMs that didn't shut down cleanly)
+      "r ${cfg.dataDir}/pools/*/*.sock - - - - -"
+
+      # Remove VM log files older than 1 day
+      "e ${cfg.dataDir}/pools/*/*.log - - - 1d -"
     ];
 
     #
@@ -426,6 +433,12 @@ in
           ExecStart = "${cfg.package}/bin/fireglab serve --config ${effectiveConfigPath}";
           Restart = "always";
           RestartSec = "10s";
+
+          # Allow enough time for graceful shutdown (runner unregistration from GitLab API)
+          TimeoutStopSec = "60s";
+
+          # Cleanup stale socket files when service stops
+          ExecStopPost = "${pkgs.findutils}/bin/find ${cfg.dataDir}/pools -name '*.sock' -delete";
 
           # OOM protection - critical infrastructure service
           OOMScoreAdjust = -900;

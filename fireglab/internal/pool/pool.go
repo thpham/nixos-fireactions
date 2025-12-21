@@ -157,20 +157,19 @@ func (p *Pool) Stop() error {
 	defer cancel()
 
 	for id, runner := range p.runners {
-		// Skip runners that already completed - ephemeral runners auto-deregister from GitLab
-		if runner.Status == RunnerStateStopped || runner.Status == RunnerStateFailed {
-			p.log.Debugf("Skipping cleanup for completed runner %s (status: %s)", id, runner.Status)
-			continue
-		}
-
-		// For active runners, delete from GitLab
-		// This prevents the runner from showing as offline in GitLab UI
+		// Always try to delete runners from GitLab during shutdown if they have a GitLab ID
+		// Note: GitLab runners do NOT auto-deregister; they must be deleted via API
+		// to prevent orphaned runners appearing offline in GitLab UI
 		if runner.GitLabRunnerID != 0 {
-			p.log.Infof("Deleting runner %s (GitLab ID: %d) from GitLab", runner.Name, runner.GitLabRunnerID)
+			p.log.Infof("Deleting runner %s (GitLab ID: %d, status: %s) from GitLab",
+				runner.Name, runner.GitLabRunnerID, runner.Status)
 			if err := p.gitlab.DeleteRunner(shutdownCtx, runner.GitLabRunnerID); err != nil {
 				p.log.Warnf("Failed to delete runner %s from GitLab: %v", runner.Name, err)
 				// Continue with VM destruction even if deletion fails
 			}
+		} else {
+			p.log.Debugf("Skipping GitLab cleanup for runner %s (no GitLab ID assigned, status: %s)",
+				id, runner.Status)
 		}
 
 		// Destroy the VM if it's still running
@@ -425,7 +424,7 @@ func (p *Pool) createRunnerVM(runnerID, runnerName string) {
 	metadata["fireglab"] = map[string]interface{}{
 		"gitlab_instance_url": p.gitlab.GetInstanceURL(),
 		"runner_token":        gitlabRunner.Token, // glrt-* token
-		"runner_id":           gitlabRunner.ID,    // GitLab runner ID for tracking
+		"gitlab_runner_id":    gitlabRunner.ID,    // GitLab runner ID for tracking/cleanup
 		"runner_name":         runnerName,
 		"runner_tags":         runnerLabels,
 		"pool_name":           p.cfg.Name,
