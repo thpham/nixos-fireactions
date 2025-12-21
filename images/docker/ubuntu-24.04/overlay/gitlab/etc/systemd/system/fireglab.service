@@ -18,9 +18,15 @@ User=root
 # The runner command:
 # 1. Fetches metadata from MMDS (glrt-* token, gitlab URL, tags)
 # 2. Registers gitlab-runner with GitLab using the token
-# 3. Starts gitlab-runner daemon in single-job mode
+# 3. Starts gitlab-runner daemon in single-job mode (run-single)
 # 4. Exits when job completes (triggering VM reboot via SuccessAction)
-ExecStart=/usr/bin/fireglab runner --log-level=info --single-job
+#
+# Runtime paths configured for runner user context:
+# - work-dir: Runner's home directory for builds/cache
+# - config: User-specific config to avoid /etc permission issues
+ExecStart=/usr/bin/fireglab runner --log-level=info --single-job \
+    --work-dir=/home/runner \
+    --config=/home/runner/.gitlab-runner/config.toml
 Restart=on-failure
 RestartSec=5s
 

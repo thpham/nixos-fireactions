@@ -280,8 +280,8 @@ RUN case "$TARGETARCH" in amd64|x86_64|i386) export RUNNER_ARCH="amd64";; arm64)
     && chmod +x gitlab-runner                                                                                                                     \
     && ln -s /opt/gitlab-runner/gitlab-runner /usr/local/bin/gitlab-runner                                                                       \
     && chown -R runner:docker /opt/gitlab-runner                                                                                                 \
-    && mkdir -p /etc/gitlab-runner                                                                                                               \
-    && chown -R runner:docker /etc/gitlab-runner
+    && mkdir -p /home/runner/.gitlab-runner                                                                                                      \
+    && chown -R runner:docker /home/runner/.gitlab-runner
 
 # Install GitLab CLI (glab)
 RUN curl -fsSL https://raw.githubusercontent.com/upciti/wakemeops/main/assets/install_repository | bash \

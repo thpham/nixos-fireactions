@@ -45,6 +45,8 @@ type Runner struct {
 	stdout           io.Writer
 	stderr           io.Writer
 	log              *logrus.Logger
+	// metadata stores registration info for run-single mode
+	metadata *mmds.Metadata
 }
 
 // Option is a functional option for configuring the Runner.
@@ -156,6 +158,13 @@ func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
+	// Remove any existing config to prevent duplicate [[runners]] entries on restart
+	// gitlab-runner register appends to existing config, which causes issues if
+	// the service restarts after a failed run attempt
+	if err := os.Remove(r.configPath); err != nil && !os.IsNotExist(err) {
+		r.log.Warnf("Failed to remove existing config file: %v", err)
+	}
+
 	// Build registration command
 	// With the new runner authentication tokens (glrt-*), we use --token directly
 	// The runner was already created via the API, so we just need to register locally
@@ -194,18 +203,21 @@ func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
 		return fmt.Errorf("registration failed: %w", err)
 	}
 
+	// Store metadata for run-single mode
+	r.metadata = metadata
+
 	r.log.Info("Runner registered successfully")
 	return nil
 }
 
 // Run starts the gitlab-runner daemon and blocks until it exits.
 // This should be called after Register.
-// The daemon runs with --max-builds 1 to exit after completing one job (ephemeral mode).
+// The runner will continuously poll for jobs until stopped or the context is cancelled.
 func (r *Runner) Run(ctx context.Context) error {
-	r.log.Info("Starting gitlab-runner daemon (ephemeral mode)")
+	r.log.Info("Starting gitlab-runner daemon (continuous mode)")
 
-	// Use run-single or run with max-builds=1 for ephemeral behavior
-	// run-single executes exactly one build and then exits
+	// Use 'run' command which reads from config.toml
+	// The runner will poll for jobs until the context is cancelled
 	args := []string{
 		"run",
 		"--config", r.configPath,
@@ -256,16 +268,33 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // RunOnce starts gitlab-runner to run exactly one job and then exit.
-// This uses the run-single command which is designed for ephemeral runners.
+// Uses run-single command which processes one job and exits - true ephemeral behavior.
+// This requires metadata to be stored during Register().
 func (r *Runner) RunOnce(ctx context.Context) error {
-	r.log.Info("Starting gitlab-runner in single-job mode")
+	r.log.Info("Starting gitlab-runner in single-job mode (run-single)")
 
-	// run-single is specifically designed for ephemeral runners
-	// It picks up one job, executes it, and exits
+	if r.metadata == nil {
+		return fmt.Errorf("metadata not available - Register() must be called before RunOnce()")
+	}
+
+	// Build directories
+	buildsDir := filepath.Join(r.workDir, "builds")
+	cacheDir := filepath.Join(r.workDir, "cache")
+
+	// Use 'run-single' command which executes exactly one job and exits
+	// This provides true ephemeral behavior without relying on external VM termination
 	args := []string{
 		"run-single",
-		"--config", r.configPath,
-		"--wait-timeout", "0", // Wait indefinitely for a job
+		"--url", r.metadata.GitLabInstanceURL,
+		"--token", r.metadata.RunnerToken,
+		"--executor", r.executor,
+		"--builds-dir", buildsDir,
+		"--cache-dir", cacheDir,
+	}
+
+	// Add runner name if available
+	if r.metadata.RunnerName != "" {
+		args = append(args, "--name", r.metadata.RunnerName)
 	}
 
 	cmd := exec.CommandContext(ctx, r.gitlabRunnerPath, args...)
