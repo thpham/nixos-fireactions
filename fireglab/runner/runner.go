@@ -45,8 +45,6 @@ type Runner struct {
 	stdout           io.Writer
 	stderr           io.Writer
 	log              *logrus.Logger
-	// metadata stores registration info for run-single mode
-	metadata *mmds.Metadata
 }
 
 // Option is a functional option for configuring the Runner.
@@ -203,9 +201,6 @@ func (r *Runner) Register(ctx context.Context, metadata *mmds.Metadata) error {
 		return fmt.Errorf("registration failed: %w", err)
 	}
 
-	// Store metadata for run-single mode
-	r.metadata = metadata
-
 	r.log.Info("Runner registered successfully")
 	return nil
 }
@@ -269,13 +264,9 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // RunOnce starts gitlab-runner to run exactly one job and then exit.
 // Uses run-single command which processes one job and exits - true ephemeral behavior.
-// This requires metadata to be stored during Register().
-func (r *Runner) RunOnce(ctx context.Context) error {
+// Takes metadata directly since run-single doesn't need registration.
+func (r *Runner) RunOnce(ctx context.Context, metadata *mmds.Metadata) error {
 	r.log.Info("Starting gitlab-runner in single-job mode (run-single)")
-
-	if r.metadata == nil {
-		return fmt.Errorf("metadata not available - Register() must be called before RunOnce()")
-	}
 
 	// Build directories
 	buildsDir := filepath.Join(r.workDir, "builds")
@@ -285,16 +276,16 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	// This provides true ephemeral behavior without relying on external VM termination
 	args := []string{
 		"run-single",
-		"--url", r.metadata.GitLabInstanceURL,
-		"--token", r.metadata.RunnerToken,
+		"--url", metadata.GitLabInstanceURL,
+		"--token", metadata.RunnerToken,
 		"--executor", r.executor,
 		"--builds-dir", buildsDir,
 		"--cache-dir", cacheDir,
 	}
 
 	// Add runner name if available
-	if r.metadata.RunnerName != "" {
-		args = append(args, "--name", r.metadata.RunnerName)
+	if metadata.RunnerName != "" {
+		args = append(args, "--name", metadata.RunnerName)
 	}
 
 	cmd := exec.CommandContext(ctx, r.gitlabRunnerPath, args...)

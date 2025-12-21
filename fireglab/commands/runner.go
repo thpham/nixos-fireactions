@@ -14,15 +14,15 @@ import (
 )
 
 var (
-	runnerLogLevel       string
-	runnerRetryWait      time.Duration
-	runnerGitLabPath     string
-	runnerWorkDir        string
-	runnerConfigPath     string
-	runnerOwner          string
-	runnerGroup          string
-	runnerExecutor       string
-	runnerSingleJobMode  bool
+	runnerLogLevel      string
+	runnerRetryWait     time.Duration
+	runnerGitLabPath    string
+	runnerWorkDir       string
+	runnerConfigPath    string
+	runnerOwner         string
+	runnerGroup         string
+	runnerExecutor      string
+	runnerSingleJobMode bool
 )
 
 // runnerCmd represents the runner command for VM mode
@@ -120,25 +120,25 @@ func runRunner(cmd *cobra.Command, args []string) error {
 		runner.WithLogger(log),
 	)
 
-	// Register with GitLab
-	// The runner was already created via POST /api/v4/user/runners by the host
-	// We're just registering locally with the glrt-* token
-	log.Info("Registering runner with GitLab...")
-	if err := r.Register(ctx, metadata); err != nil {
-		log.Errorf("Failed to register runner: %v", err)
-		return err
-	}
-
 	// Run the runner daemon
 	log.Info("Starting gitlab-runner daemon...")
 	if runnerSingleJobMode {
 		// Use run-single for ephemeral mode (one job, then exit)
-		if err := r.RunOnce(ctx); err != nil {
+		// run-single takes all parameters via CLI, no registration needed
+		// This avoids creating duplicate system_ids (one from register, one from run-single)
+		if err := r.RunOnce(ctx, metadata); err != nil {
 			log.Errorf("Runner error: %v", err)
 			return err
 		}
 	} else {
-		// Standard run mode
+		// Standard run mode requires registration to create config.toml
+		// The runner was already created via POST /api/v4/user/runners by the host
+		// We're just registering locally with the glrt-* token
+		log.Info("Registering runner with GitLab...")
+		if err := r.Register(ctx, metadata); err != nil {
+			log.Errorf("Failed to register runner: %v", err)
+			return err
+		}
 		if err := r.Run(ctx); err != nil {
 			log.Errorf("Runner error: %v", err)
 			return err
