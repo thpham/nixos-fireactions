@@ -26,6 +26,14 @@ const (
 	RunnerStateFailed   RunnerState = "failed"
 )
 
+const (
+	// BusyRunnerGracePeriod is the time to wait for busy runners to complete
+	// their job before forcefully stopping them during shutdown.
+	// NOTE: This must be less than systemd's TimeoutStopSec (default 150s in services.nix)
+	// to allow time for cleanup after the grace period expires.
+	BusyRunnerGracePeriod = 2 * time.Minute
+)
+
 // RunnerInfo contains information about a single runner VM.
 type RunnerInfo struct {
 	ID        string      `json:"id"`
@@ -138,6 +146,7 @@ func (p *Pool) Start(ctx context.Context) error {
 // Stop gracefully stops the pool and all runners.
 // This includes unregistering active runners from Gitea and destroying VMs.
 // Runners that already completed are deregistered by monitorRunner, so we skip them here.
+// Busy runners (checked via Gitea API) are given a grace period to complete their job.
 func (p *Pool) Stop() error {
 	p.cancel()
 	if p.scaleTicker != nil {
@@ -145,37 +154,110 @@ func (p *Pool) Stop() error {
 	}
 	p.wg.Wait()
 
-	// Stop all runners
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	// Create a context with timeout for shutdown operations
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	for id, runner := range p.runners {
+	// Collect runners to stop (take a snapshot to avoid holding lock during operations)
+	p.mu.Lock()
+	var activeRunners []*RunnerInfo
+	for _, runner := range p.runners {
 		// Skip runners that already completed - monitorRunner already deregistered them from Gitea
 		if runner.Status == RunnerStateStopped || runner.Status == RunnerStateFailed {
-			p.log.Debugf("Skipping cleanup for completed runner %s (status: %s)", id, runner.Status)
+			p.log.Debugf("Skipping cleanup for completed runner %s (status: %s)", runner.ID, runner.Status)
 			continue
 		}
+		activeRunners = append(activeRunners, runner)
+	}
+	p.mu.Unlock()
 
-		// For active runners, try to unregister from Gitea
-		// This prevents the runner from showing as offline in Gitea UI
-		if runner.Name != "" {
-			p.log.Infof("Unregistering active runner %s from Gitea", runner.Name)
-			if err := p.gitea.DeleteRunnerByName(shutdownCtx, runner.Name); err != nil {
-				p.log.Warnf("Failed to unregister runner %s from Gitea: %v", runner.Name, err)
-				// Continue with VM destruction even if unregistration fails
+	if len(activeRunners) == 0 {
+		// Close the VM manager
+		if p.vmManager != nil {
+			if err := p.vmManager.Close(); err != nil {
+				p.log.Errorf("Failed to close VM manager: %v", err)
+			}
+		}
+		return nil
+	}
+
+	// Check Gitea API to determine which runners are actually busy
+	var idleRunners, busyRunners []*RunnerInfo
+	for _, runner := range activeRunners {
+		giteaRunner, err := p.gitea.GetRunnerByName(shutdownCtx, runner.Name)
+		if err != nil {
+			p.log.Warnf("Failed to check runner %s status from Gitea: %v, treating as idle", runner.Name, err)
+			idleRunners = append(idleRunners, runner)
+			continue
+		}
+		if giteaRunner == nil {
+			// Runner not found in Gitea - already deregistered or never registered
+			p.log.Debugf("Runner %s not found in Gitea, treating as idle", runner.Name)
+			idleRunners = append(idleRunners, runner)
+			continue
+		}
+		if giteaRunner.Busy {
+			p.log.WithFields(logrus.Fields{
+				"runner_name": runner.Name,
+				"gitea_id":    giteaRunner.ID,
+			}).Info("Runner is busy, will wait for job completion")
+			busyRunners = append(busyRunners, runner)
+		} else {
+			idleRunners = append(idleRunners, runner)
+		}
+	}
+
+	// Immediately stop idle runners
+	for _, runner := range idleRunners {
+		p.stopRunner(shutdownCtx, runner)
+	}
+
+	// Give busy runners a grace period to complete their job
+	if len(busyRunners) > 0 {
+		p.log.WithField("count", len(busyRunners)).Infof(
+			"Waiting up to %v for busy runners to complete their jobs", BusyRunnerGracePeriod)
+
+		// Wait for busy runners with a grace period
+		graceCtx, graceCancel := context.WithTimeout(context.Background(), BusyRunnerGracePeriod)
+		defer graceCancel()
+
+		// Check periodically if busy runners have completed (via Gitea API)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+	waitLoop:
+		for {
+			select {
+			case <-graceCtx.Done():
+				// Grace period expired
+				p.log.Warn("Grace period expired, forcefully stopping remaining busy runners")
+				break waitLoop
+			case <-ticker.C:
+				// Check Gitea API to see if runners are still busy
+				stillBusy := 0
+				for _, runner := range busyRunners {
+					giteaRunner, err := p.gitea.GetRunnerByName(shutdownCtx, runner.Name)
+					if err != nil {
+						p.log.Warnf("Failed to check runner %s status: %v", runner.Name, err)
+						stillBusy++ // Assume still busy on error
+						continue
+					}
+					if giteaRunner != nil && giteaRunner.Busy {
+						stillBusy++
+					}
+				}
+
+				if stillBusy == 0 {
+					p.log.Info("All busy runners completed their jobs")
+					break waitLoop
+				}
+				p.log.WithField("remaining", stillBusy).Debug("Still waiting for busy runners")
 			}
 		}
 
-		// Destroy the VM if it's still running
-		if runner.VMID != "" {
-			p.log.Infof("Stopping runner %s (VM: %s)", id, runner.VMID)
-			if err := p.vmManager.DestroyVM(runner.VMID); err != nil {
-				p.log.Errorf("Failed to destroy VM %s: %v", runner.VMID, err)
-			}
+		// Stop all busy runners (whether completed or grace period expired)
+		for _, runner := range busyRunners {
+			p.stopRunner(shutdownCtx, runner)
 		}
 	}
 
@@ -187,6 +269,33 @@ func (p *Pool) Stop() error {
 	}
 
 	return nil
+}
+
+// stopRunner unregisters a runner from Gitea and destroys its VM.
+// Note: This does not hold the pool mutex, so it's safe to call from Stop().
+func (p *Pool) stopRunner(ctx context.Context, runner *RunnerInfo) {
+	// Try to unregister from Gitea
+	// This prevents the runner from showing as offline in Gitea UI
+	if runner.Name != "" {
+		p.log.Infof("Unregistering runner %s from Gitea", runner.Name)
+		if err := p.gitea.DeleteRunnerByName(ctx, runner.Name); err != nil {
+			p.log.Warnf("Failed to unregister runner %s from Gitea: %v", runner.Name, err)
+			// Continue with VM destruction even if unregistration fails
+		}
+	}
+
+	// Destroy the VM if it's still running
+	if runner.VMID != "" {
+		p.log.Infof("Stopping runner %s (VM: %s)", runner.ID, runner.VMID)
+		if err := p.vmManager.DestroyVM(runner.VMID); err != nil {
+			p.log.Errorf("Failed to destroy VM %s: %v", runner.VMID, err)
+		}
+	}
+
+	// Update status with lock
+	p.mu.Lock()
+	runner.Status = RunnerStateStopped
+	p.mu.Unlock()
 }
 
 // Pause pauses the pool. Pausing prevents the pool from scaling.
@@ -487,28 +596,34 @@ func (p *Pool) getRunnerName(runnerID string) string {
 // monitorRunner watches a runner VM and cleans up when it exits.
 // When a job completes, act_runner (with --once flag) exits, causing the VM to terminate.
 // This triggers cleanup including Gitea deregistration, and the scaling loop spawns a replacement.
+// If context is cancelled (shutdown), cleanup is skipped - Stop() handles it.
 func (p *Pool) monitorRunner(runnerID, vmID string, startTime time.Time) {
 	// Wait for VM to exit - act_runner with --once flag exits after completing a job
 	err := p.vmManager.WaitForExit(p.ctx, vmID)
 
 	lifetime := time.Since(startTime)
 
+	// If context was cancelled, Stop() will handle all cleanup
+	// Just log and return - don't race with Stop()
+	if p.ctx.Err() != nil {
+		p.log.WithFields(logrus.Fields{
+			"runner_id": runnerID,
+			"vm_id":     vmID,
+			"lifetime":  lifetime.Round(time.Second),
+		}).Debug("Monitor exiting due to shutdown, Stop() will handle cleanup")
+		return
+	}
+
 	// Get runner name for Gitea cleanup before updating status
 	runnerName := p.getRunnerName(runnerID)
 
-	if err != nil && p.ctx.Err() == nil {
+	if err != nil {
 		p.log.WithFields(logrus.Fields{
 			"runner_id": runnerID,
 			"vm_id":     vmID,
 			"lifetime":  lifetime.Round(time.Second),
 			"error":     err,
 		}).Error("Runner VM exited with error")
-	} else if p.ctx.Err() != nil {
-		p.log.WithFields(logrus.Fields{
-			"runner_id": runnerID,
-			"vm_id":     vmID,
-			"lifetime":  lifetime.Round(time.Second),
-		}).Info("Runner stopped due to shutdown signal")
 	} else {
 		p.log.WithFields(logrus.Fields{
 			"runner_id": runnerID,
@@ -518,8 +633,7 @@ func (p *Pool) monitorRunner(runnerID, vmID string, startTime time.Time) {
 	}
 
 	// Deregister runner from Gitea (not using --ephemeral, so manual cleanup required)
-	// Skip if shutting down - Stop() handles cleanup for active runners
-	if p.ctx.Err() == nil && runnerName != "" {
+	if runnerName != "" {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := p.gitea.DeleteRunnerByName(cleanupCtx, runnerName); err != nil {
@@ -550,15 +664,12 @@ func (p *Pool) monitorRunner(runnerID, vmID string, startTime time.Time) {
 		}).Info("VM resources cleaned up, runner slot available for replacement")
 	}
 
-	// Signal immediate scaling if not shutting down
-	// This avoids waiting for the next scaling loop tick (up to 10s delay)
-	if p.ctx.Err() == nil {
-		select {
-		case p.scaleSignal <- struct{}{}:
-			// Signal sent successfully
-		default:
-			// Channel already has a signal pending, no need to send another
-		}
+	// Signal immediate scaling to spawn replacement runner
+	select {
+	case p.scaleSignal <- struct{}{}:
+		// Signal sent successfully
+	default:
+		// Channel already has a signal pending, no need to send another
 	}
 }
 

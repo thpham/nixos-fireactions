@@ -434,8 +434,10 @@ in
           Restart = "always";
           RestartSec = "10s";
 
-          # Allow enough time for graceful shutdown (runner unregistration from Gitea API)
-          TimeoutStopSec = "60s";
+          # Allow enough time for graceful shutdown:
+          # - BusyRunnerGracePeriod (2min) for busy runners to complete jobs
+          # - Plus 30s for cleanup (Gitea deregistration, VM destruction)
+          TimeoutStopSec = "150s";
 
           # Cleanup stale socket files when service stops
           ExecStopPost = "${pkgs.findutils}/bin/find ${cfg.dataDir}/pools -name '*.sock' -delete";
