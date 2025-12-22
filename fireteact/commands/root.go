@@ -26,6 +26,10 @@ fireactions for GitHub Actions.
 When run without a subcommand, fireteact starts the orchestrator server.
 Use 'fireteact runner' inside a VM to start the runner agent.`,
 	Version: fmt.Sprintf("%s (commit: %s, built: %s)", Version, Commit, Date),
+	// Don't print usage on errors - we handle errors with proper logging
+	SilenceUsage: true,
+	// Don't print errors twice - we log them ourselves
+	SilenceErrors: true,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

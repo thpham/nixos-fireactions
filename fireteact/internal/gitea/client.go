@@ -272,6 +272,23 @@ func (c *Client) DeleteRunnerByName(ctx context.Context, name string) error {
 	return nil
 }
 
+// GetRunnerByName finds a runner by its name and returns its full status.
+// Returns nil if the runner is not found.
+func (c *Client) GetRunnerByName(ctx context.Context, name string) (*Runner, error) {
+	runners, err := c.ListRunners(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list runners: %w", err)
+	}
+
+	for _, runner := range runners {
+		if runner.Name == name {
+			return &runner, nil
+		}
+	}
+
+	return nil, nil // Not found
+}
+
 // GetPendingJobs retrieves pending jobs that match the given labels.
 // Note: This is a placeholder - the actual implementation depends on Gitea's API.
 func (c *Client) GetPendingJobs(ctx context.Context, labels []string) ([]Job, error) {

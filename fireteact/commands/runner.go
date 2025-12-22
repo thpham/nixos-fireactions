@@ -129,6 +129,11 @@ func runRunner(cmd *cobra.Command, args []string) error {
 	// Register with Gitea
 	log.Info("Registering runner with Gitea...")
 	if err := r.Register(ctx, metadata); err != nil {
+		// Check if this was a signal-induced shutdown (not a real error)
+		if ctx.Err() != nil {
+			log.Info("Registration interrupted by shutdown signal")
+			return nil // Clean exit, not an error
+		}
 		log.Errorf("Failed to register runner: %v", err)
 		return err
 	}
@@ -136,6 +141,11 @@ func runRunner(cmd *cobra.Command, args []string) error {
 	// Run the runner daemon
 	log.Info("Starting act_runner daemon...")
 	if err := r.Run(ctx); err != nil {
+		// Check if this was a signal-induced shutdown (not a real error)
+		if ctx.Err() != nil {
+			log.Info("Runner stopped by shutdown signal")
+			return nil // Clean exit, not an error
+		}
 		log.Errorf("Runner error: %v", err)
 		return err
 	}

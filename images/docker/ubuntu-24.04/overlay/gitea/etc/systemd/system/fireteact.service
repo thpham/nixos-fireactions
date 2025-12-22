@@ -9,7 +9,6 @@ Documentation=https://github.com/thpham/nixos-fireactions
 # 3. Fireteact starts with CA bundle containing our cert
 # After= is ignored if service doesn't exist (e.g., no cloud-init installed)
 After=network.target cloud-config.service docker.service
-Requires=docker.service
 SuccessAction=reboot
 
 [Service]
