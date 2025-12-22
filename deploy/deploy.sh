@@ -18,6 +18,9 @@
 #   --name NAME       Host name (default: auto-generated from provider+IP)
 #   --tags TAG1,TAG2  Comma-separated tags for profile selection
 #   --arch ARCH       Architecture: x86_64 (default) or aarch64
+#   --user USER       SSH user (default: root, use 'nixos' for live ISO)
+#   --env-password    Use password from SSHPASS environment variable
+#   --no-kexec        Skip kexec phase (use when booted from NixOS live ISO)
 #
 # Examples:
 #   ./deploy.sh --provider do --name do-runner-1 --tags prod,runners 167.71.100.50
@@ -122,6 +125,9 @@ ARCH="x86_64"
 HOST_NAME=""
 TAGS=""
 GENERATE_HW_CONFIG=""
+NO_KEXEC=""
+SSH_USER="root"
+ENV_PASSWORD=""
 POSITIONAL_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -142,6 +148,19 @@ while [[ $# -gt 0 ]]; do
             ARCH="$2"
             shift 2
             ;;
+        --user|-u)
+            SSH_USER="$2"
+            shift 2
+            ;;
+        --env-password)
+            ENV_PASSWORD="--env-password"
+            shift
+            ;;
+        --no-kexec)
+            # Skip kexec phase - use disko,install,reboot instead
+            NO_KEXEC="--phases disko,install,reboot"
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS] <ip>"
             echo "       $0 list"
@@ -152,6 +171,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --name, -n NAME       Host name (default: auto-generated)"
             echo "  --tags, -t TAG1,TAG2  Comma-separated tags for profile selection"
             echo "  --arch, -a ARCH       Architecture: x86_64 (default) or aarch64"
+            echo "  --user, -u USER       SSH user (default: root, use 'nixos' for live ISO)"
+            echo "  --env-password        Use password from SSHPASS environment variable"
+            echo "  --no-kexec            Skip kexec phase (manually, usually auto-detected)"
             exit 0
             ;;
         -*)
@@ -232,6 +254,7 @@ fi
 
 echo "=== Fireactions NixOS Deployment ==="
 echo "Target host:  $TARGET_HOST"
+echo "SSH user:     $SSH_USER"
 echo "Host name:    $HOST_NAME"
 echo "Provider:     $PROVIDER"
 echo "Architecture: $ARCH"
@@ -255,10 +278,28 @@ fi
 
 # Verify SSH connectivity
 echo "Verifying SSH connectivity..."
-if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "root@$TARGET_HOST" exit 2>/dev/null; then
-    echo "ERROR: Cannot connect to root@$TARGET_HOST"
-    echo "Make sure the target is accessible via SSH."
-    exit 1
+if [[ -n "$ENV_PASSWORD" ]]; then
+    if [[ -z "$SSHPASS" ]]; then
+        echo "ERROR: --env-password requires SSHPASS environment variable"
+        echo "Usage: SSHPASS='your-password' $0 --env-password ..."
+        exit 1
+    fi
+    if ! command -v sshpass &> /dev/null; then
+        echo "ERROR: sshpass command not found (required for --env-password)"
+        echo "Install with: nix-shell -p sshpass"
+        exit 1
+    fi
+    if ! sshpass -e ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "${SSH_USER}@$TARGET_HOST" exit 2>/dev/null; then
+        echo "ERROR: Cannot connect to ${SSH_USER}@$TARGET_HOST with password"
+        exit 1
+    fi
+else
+    if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@$TARGET_HOST" exit 2>/dev/null; then
+        echo "ERROR: Cannot connect to ${SSH_USER}@$TARGET_HOST"
+        echo "Make sure the target is accessible via SSH."
+        echo "For NixOS live ISO with password, use: SSHPASS='password' $0 --user nixos --env-password ..."
+        exit 1
+    fi
 fi
 
 echo "SSH connection verified."
@@ -279,9 +320,11 @@ echo ""
 # shellcheck disable=SC2086
 if nix run github:nix-community/nixos-anywhere -- \
     --flake "${FLAKE_DIR}#${FLAKE_TARGET}" \
-    --target-host "root@$TARGET_HOST" \
+    --target-host "${SSH_USER}@$TARGET_HOST" \
     --build-on remote \
     --option accept-flake-config true \
+    $ENV_PASSWORD \
+    $NO_KEXEC \
     $GENERATE_HW_CONFIG \
     --debug; then
 

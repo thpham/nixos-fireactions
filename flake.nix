@@ -132,6 +132,7 @@
               sops # For secrets management
               age # For sops encryption
               ssh-to-age
+              sshpass # For password-based SSH in deploy.sh
             ]
             ++ lib.optionals isLinux [
               firecracker
