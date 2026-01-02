@@ -11,12 +11,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    # microvm.nix for Firecracker packages and networking patterns
-    microvm = {
-      url = "github:astro/microvm.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     # disko for declarative disk partitioning
     disko = {
       url = "github:nix-community/disko";
@@ -42,7 +36,6 @@
       nixpkgs,
       flake-utils,
       nixos-generators,
-      microvm,
       disko,
       colmena,
       sops-nix,
@@ -73,12 +66,6 @@
         targetSystem = "${hostArch}-linux";
         crossTargetSystem = "${crossArch}-linux";
 
-        # Native pkgs with overlays (for local testing of packages)
-        pkgsWithOverlays = import nixpkgs {
-          inherit system;
-          overlays = [ microvm.overlay ];
-        };
-
         # Helper to build NixOS images using nixos-generators
         # Uses system argument to let nixos-generators handle pkgs correctly
         mkImages = targetSys: {
@@ -103,14 +90,14 @@
         # Packages: All Linux-only (fireactions/fireteact depend on Linux networking primitives)
         packages =
           lib.optionalAttrs isLinux {
-            fireactions = pkgsWithOverlays.callPackage ./pkgs/fireactions.nix { };
-            fireteact = pkgsWithOverlays.callPackage ./pkgs/fireteact.nix { };
-            fireglab = pkgsWithOverlays.callPackage ./pkgs/fireglab.nix { };
-            firecracker-kernel = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel.nix { };
-            firecracker-kernel-custom = pkgsWithOverlays.callPackage ./pkgs/firecracker-kernel-custom.nix { };
-            tc-redirect-tap = pkgsWithOverlays.callPackage ./pkgs/tc-redirect-tap.nix { };
-            zot = pkgsWithOverlays.callPackage ./pkgs/zot.nix { };
-            default = pkgsWithOverlays.callPackage ./pkgs/fireactions.nix { };
+            fireactions = pkgsNative.callPackage ./pkgs/fireactions.nix { };
+            fireteact = pkgsNative.callPackage ./pkgs/fireteact.nix { };
+            fireglab = pkgsNative.callPackage ./pkgs/fireglab.nix { };
+            firecracker-kernel = pkgsNative.callPackage ./pkgs/firecracker-kernel.nix { };
+            firecracker-kernel-custom = pkgsNative.callPackage ./pkgs/firecracker-kernel-custom.nix { };
+            tc-redirect-tap = pkgsNative.callPackage ./pkgs/tc-redirect-tap.nix { };
+            zot = pkgsNative.callPackage ./pkgs/zot.nix { };
+            default = pkgsNative.callPackage ./pkgs/fireactions.nix { };
           }
           // {
             # Images - available on all platforms, always target Linux

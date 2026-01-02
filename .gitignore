@@ -6,7 +6,8 @@ result-*
 .direnv/
 
 # project
-docs/
+.claude/
+.serena/
 
 # Editor files
 *.swp
